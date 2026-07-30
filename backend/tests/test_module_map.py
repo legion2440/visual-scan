@@ -43,8 +43,8 @@ def iter_referenced_paths(module_map: dict[str, Any]) -> list[str]:
 
     for feature in module_map["features"].values():
         paths.append(feature["entrypoint"])
-        for field in ("contracts", "depends_on", "tests"):
-            paths.extend(feature[field])
+        for field in ("contracts", "implementation", "depends_on", "tests"):
+            paths.extend(feature.get(field, []))
     return paths
 
 

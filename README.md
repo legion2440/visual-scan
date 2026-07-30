@@ -1,13 +1,14 @@
 # Visual Scan
 
 Visual Scan combines a standalone Vanilla JavaScript document-scanning
-frontend with a minimal FastAPI backend foundation. The frontend accepts a
+frontend with a FastAPI backend. The frontend accepts a
 document image or camera capture, lets the user prepare the page on a
 `<canvas>`, and extracts editable text with Tesseract.js in the browser.
 
-The backend currently reports health and establishes the module boundaries for
-future OCR, analysis, and storage features. Server-side OCR, AI analysis,
-database storage, authentication, and Docker are not implemented yet.
+The backend reports health and provides independent server-side OCR with
+in-memory Pillow preprocessing and the system Tesseract executable. AI
+analysis, database storage, authentication, Docker, and PDF OCR are not
+implemented yet.
 
 ## Features
 
@@ -21,6 +22,8 @@ database storage, authentication, and Docker are not implemented yet.
 - Editable extracted text.
 - Optional AI analysis request to a configured backend.
 - FastAPI application factory with CORS and `GET /api/health`.
+- Independent server-side Tesseract OCR for JPEG, PNG, and WebP uploads.
+- Server preprocessing modes: none, grayscale, and binary threshold.
 - Local results archive with sorting, search, classification filtering,
   detail view, deletion, and JSON export.
 - Two views: **Upload & Scan** and **Scanned Results**.
@@ -29,6 +32,19 @@ The results archive uses `localStorage`. It is not synchronized with a backend.
 If the browser storage quota is reached, Visual Scan retries the new record
 without its image preview. Existing records and previews are never removed
 automatically.
+
+## Browser OCR and server OCR
+
+| | Browser OCR | Server OCR |
+| --- | --- | --- |
+| Engine | Tesseract.js worker | System Tesseract through pytesseract |
+| Input | Current Canvas image | Multipart JPEG, PNG, or WebP upload |
+| Preprocessing | Interactive Canvas controls | Requested none, grayscale, or threshold mode |
+| Models | Local frontend `traineddata` profiles | Languages installed with system Tesseract |
+| Backend required | No | Yes |
+
+The existing frontend continues to use browser OCR and is not yet wired to the
+server OCR endpoint. The two paths are intentionally independent in this step.
 
 ## OCR model profiles
 
@@ -129,6 +145,36 @@ and its development tools:
 python -m pip install -e "./backend[dev]"
 ```
 
+The Python package installs Pillow and pytesseract, but pytesseract does not
+bundle the native Tesseract executable or language data. Install Tesseract
+separately:
+
+```bash
+# Ubuntu/Debian, including the languages exposed by the API
+sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus \
+  tesseract-ocr-deu tesseract-ocr-fra tesseract-ocr-spa
+
+# macOS
+brew install tesseract tesseract-lang
+```
+
+On Windows, use a Tesseract 5 installer such as the builds referenced by the
+[official Tesseract installation guide](https://tesseract-ocr.github.io/tessdoc/Installation.html).
+Add the installation directory to `PATH`, or set
+`VISUAL_SCAN_TESSERACT_CMD` to the full executable path. Ensure the `eng`,
+`rus`, `deu`, `fra`, and `spa` traineddata files are installed for the
+languages you intend to use.
+
+Verify the executable and installed language packs before starting the API:
+
+```bash
+tesseract --version
+tesseract --list-langs
+```
+
+If `VISUAL_SCAN_TESSERACT_CMD` points to an executable outside `PATH`, run the
+same checks with that full executable path.
+
 `backend/.env` is optional. When present, it is always loaded relative to the
 backend package rather than the current working directory. Start the API:
 
@@ -187,11 +233,18 @@ settings cover:
 - API prefix;
 - CORS origins;
 - documented host and port.
+- optional Tesseract executable path;
+- OCR timeout;
+- upload byte and decoded pixel limits.
 
 `VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
 
 ```dotenv
 VISUAL_SCAN_CORS_ORIGINS=["http://localhost:5500","http://127.0.0.1:5500"]
+VISUAL_SCAN_TESSERACT_CMD=
+VISUAL_SCAN_OCR_TIMEOUT_SECONDS=45
+VISUAL_SCAN_MAX_IMAGE_BYTES=20971520
+VISUAL_SCAN_MAX_IMAGE_PIXELS=25000000
 ```
 
 The default allowed frontend origins are `http://localhost:5500` and
@@ -234,6 +287,16 @@ The backend indicator reports network reachability only. A received HTTP error
 still means the backend is reachable; only a network failure or timeout marks
 it as unavailable. AI request errors are displayed separately.
 
+The server OCR endpoint applies its own configurable byte and pixel limits. It
+also rejects an empty or corrupt upload, an unsupported MIME type, and any
+mismatch between the declared MIME type and the decoded image format. Pillow
+decompression-bomb warnings and errors are returned as HTTP 413.
+
+The application does not save an uploaded original and does not create its own
+temporary files. FastAPI's multipart parser uses `SpooledTemporaryFile`, so it
+may place a large multipart part in system temporary storage before the
+endpoint runs. Strict zero-disk upload handling is outside this step.
+
 ## Pinned browser dependencies
 
 The Tesseract browser script and worker use `5.1.1`; the WebAssembly core uses
@@ -250,7 +313,7 @@ selected local profile with `gzip: false` and OEM 1.
 
 ## Backend API
 
-The implemented endpoint is:
+Health:
 
 ```http
 GET /api/health
@@ -266,6 +329,61 @@ Example response:
 }
 ```
 
+Server-side OCR:
+
+```http
+POST /api/ocr/recognize
+Content-Type: multipart/form-data
+```
+
+Multipart fields:
+
+- `file` — matching JPEG, PNG, or WebP content;
+- `language` — `eng`, `rus`, `eng+rus`, `deu`, `fra`, or `spa`; default
+  `eng`;
+- `preprocessing` — `none`, `grayscale`, or `threshold`; default `none`;
+- `threshold` — optional integer from 0 through 255, valid only in threshold
+  mode; its threshold-mode default is 160.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/ocr/recognize \
+  -F "file=@public/sample-docs/invoice.jpg;type=image/jpeg" \
+  -F "language=eng" \
+  -F "preprocessing=grayscale"
+```
+
+Example response:
+
+```json
+{
+  "filename": "invoice.jpg",
+  "text": "Recognized text",
+  "confidence": 91.25,
+  "words": 2,
+  "language": "eng",
+  "preprocessing": "grayscale",
+  "threshold": null,
+  "width": 1240,
+  "height": 1754,
+  "format": "JPEG",
+  "engine": "tesseract"
+}
+```
+
+The endpoint runs one `pytesseract.image_to_data()` recognition call per
+image. It does not query installed languages before recognition and never
+falls back to another language. Tesseract itself may perform an internal
+cached version probe, so this contract does not promise exactly one native
+subprocess.
+
+Expected OCR failures use HTTP 400 for empty or corrupt content, 413 for byte
+or pixel limits, 415 for unsupported or mismatched formats, 422 for invalid
+parameters, 503 for a missing Tesseract binary or language data, and 504 for a
+Tesseract timeout. Unexpected errors return a generic 500 response without
+local paths or tracebacks.
+
 `POST /api/ai/analyze` is intentionally absent. Until the analysis feature is
 implemented, that request receives HTTP 404. The frontend treats a received
 HTTP response as proof that the backend is reachable and keeps local image/OCR
@@ -280,11 +398,15 @@ python -m pytest backend/tests
 python -m ruff check backend
 python -m ruff format --check backend
 python -m compileall backend/app backend/tests
+npm test
 ```
 
 The module-map tests reject duplicate JSON keys, absolute or non-POSIX paths,
 parent traversal, paths that resolve outside the repository, and references to
-missing files.
+missing files. OCR API tests replace the service dependency, pipeline tests
+use in-memory Pillow images and a fake provider, and provider tests mock
+`pytesseract.image_to_data()`. The test suite never requires the system
+Tesseract binary.
 
 ## Structure
 
@@ -298,15 +420,26 @@ visual-scan/
 │   │   ├── core/
 │   │   │   └── config.py
 │   │   ├── features/
-│   │   │   └── health/
+│   │   │   ├── health/
+│   │   │   │   ├── router.py
+│   │   │   │   └── schemas.py
+│   │   │   └── ocr/
 │   │   │       ├── router.py
-│   │   │       └── schemas.py
+│   │   │       ├── schemas.py
+│   │   │       ├── service.py
+│   │   │       ├── pipeline.py
+│   │   │       ├── preprocessing.py
+│   │   │       ├── provider.py
+│   │   │       └── errors.py
 │   │   ├── factory.py
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
 │   │   ├── test_health.py
-│   │   └── test_module_map.py
+│   │   ├── test_module_map.py
+│   │   ├── test_ocr_api.py
+│   │   ├── test_ocr_pipeline.py
+│   │   └── test_tesseract_provider.py
 │   ├── .env.example
 │   ├── ARCHITECTURE.md
 │   ├── module-map.json
@@ -346,6 +479,8 @@ visual-scan/
 - `backend/app/api/router.py` composes public feature routers.
 - `backend/app/core/config.py` owns environment-backed settings.
 - `backend/app/features/health` owns the health contract and endpoint.
+- `backend/app/features/ocr` owns server-side image validation, preprocessing,
+  and Tesseract recognition.
 - `backend/module-map.json` is the backend navigation and ownership index.
 - `app.js` connects the interface, state, and user actions.
 - `config.js` contains browser/runtime URLs and safety limits.

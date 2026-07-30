@@ -5,11 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "visual-scan-backend"
 version = "0.1.0"
-description = "FastAPI foundation for Visual Scan"
+description = "FastAPI backend for Visual Scan"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.139,<1.0",
+  "pillow>=12.0,<13.0",
   "pydantic-settings>=2.14,<3.0",
+  "pytesseract>=0.3.13,<1.0",
+  "python-multipart>=0.0.22,<1.0",
   "uvicorn>=0.51,<1.0",
 ]
 

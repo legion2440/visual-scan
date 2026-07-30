@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     )
     host: str = "127.0.0.1"
     port: int = 8000
+    tesseract_cmd: str = ""
+    ocr_timeout_seconds: int = Field(default=45, gt=0)
+    max_image_bytes: int = Field(default=20_971_520, gt=0)
+    max_image_pixels: int = Field(default=25_000_000, gt=0)
 
 
 @lru_cache(maxsize=1)

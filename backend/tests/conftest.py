@@ -25,6 +25,10 @@ def test_settings() -> Settings:
         ],
         host="127.0.0.1",
         port=8000,
+        tesseract_cmd="",
+        ocr_timeout_seconds=45,
+        max_image_bytes=20_971_520,
+        max_image_pixels=25_000_000,
     )
 
 

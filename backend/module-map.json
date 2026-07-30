@@ -2,6 +2,7 @@
   "version": 1,
   "application": {
     "entrypoint": "backend/app/main.py",
+    "factory": "backend/app/factory.py",
     "api_router": "backend/app/api/router.py"
   },
   "features": {

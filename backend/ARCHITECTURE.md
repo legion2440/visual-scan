@@ -10,6 +10,15 @@ router → service → pipeline → provider/repository
 Layers are created only when real behavior requires them. A small feature such
 as health reporting can consist of only a router and its schemas.
 
+## Application assembly
+
+- `app/factory.py` exposes the side-effect-free `create_app()` factory. Tests
+  import this module and inject explicit settings without constructing the
+  production application or reading `backend/.env`.
+- `app/main.py` is the production ASGI entry point. It imports the factory and
+  creates `app` for Uvicorn.
+- `app/api/router.py` composes public feature routers.
+
 ## Layer responsibilities
 
 - **Router** owns HTTP concerns: routes, status codes, request parsing, and

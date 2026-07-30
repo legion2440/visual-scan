@@ -301,6 +301,7 @@ visual-scan/
 │   │   │   └── health/
 │   │   │       ├── router.py
 │   │   │       └── schemas.py
+│   │   ├── factory.py
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
@@ -340,7 +341,8 @@ visual-scan/
 
 ### Module responsibilities
 
-- `backend/app/main.py` owns the FastAPI application factory.
+- `backend/app/factory.py` owns the side-effect-free FastAPI application factory.
+- `backend/app/main.py` creates the production ASGI application for Uvicorn.
 - `backend/app/api/router.py` composes public feature routers.
 - `backend/app/core/config.py` owns environment-backed settings.
 - `backend/app/features/health` owns the health contract and endpoint.

@@ -35,7 +35,11 @@ def load_module_map() -> dict[str, Any]:
 def iter_referenced_paths(module_map: dict[str, Any]) -> list[str]:
     """Return values from every module-map field that represents a file path."""
     application = module_map["application"]
-    paths = [application["entrypoint"], application["api_router"]]
+    paths = [
+        application["entrypoint"],
+        application["factory"],
+        application["api_router"],
+    ]
 
     for feature in module_map["features"].values():
         paths.append(feature["entrypoint"])

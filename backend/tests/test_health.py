@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import factory
 from app.core.config import BACKEND_ROOT, ENV_FILE, Settings, get_settings
-from app.main import create_app
+from app.factory import create_app
 
 EXPECTED_HEALTH = {
     "status": "ok",
@@ -83,15 +84,32 @@ async def test_application_factory_accepts_explicit_settings() -> None:
     assert response.json() == EXPECTED_HEALTH
 
 
+async def test_factory_module_does_not_create_production_app() -> None:
+    assert not hasattr(factory, "app")
+
+
 async def test_env_file_is_bound_to_backend_directory() -> None:
     assert Path(__file__).resolve().parents[1] == BACKEND_ROOT
     assert Path(ENV_FILE) == BACKEND_ROOT / ".env"
     assert Settings.model_config["env_prefix"] == "VISUAL_SCAN_"
 
 
-async def test_get_settings_returns_cached_instance() -> None:
+async def test_get_settings_returns_cached_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    calls = 0
+
+    def build_settings() -> object:
+        nonlocal calls
+        calls += 1
+        return sentinel
+
+    monkeypatch.setattr("app.core.config.Settings", build_settings)
     get_settings.cache_clear()
     try:
-        assert get_settings() is get_settings()
+        assert get_settings() is sentinel
+        assert get_settings() is sentinel
+        assert calls == 1
     finally:
         get_settings.cache_clear()

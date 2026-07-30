@@ -253,7 +253,11 @@ export function releaseWorkerForSelection(
   });
 }
 
-/** Free the active worker when the page is closed. */
+/**
+ * Gracefully stop OCR. Shutdown shares the operation queue, so an in-progress
+ * createWorker() or recognize() call finishes before the active worker is
+ * terminated. This function does not cancel the current OCR operation.
+ */
 export function shutdown() {
   return enqueue(terminateActiveWorker);
 }

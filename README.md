@@ -42,6 +42,12 @@ worker; a later worker uses the profile-specific browser cache
 (`visual-scan-v5-fast`, `visual-scan-v5-standard`, or
 `visual-scan-v5-best`).
 
+`shutdown()` is graceful cleanup, not OCR cancellation. It is placed in the
+same operation queue as worker creation and recognition. If `createWorker()` or
+`recognize()` is already running, that operation finishes first; the active
+worker is terminated immediately afterward. User-initiated cancellation is
+reserved for a future Cancel control.
+
 The application never silently changes the selected profile, downloads
 traineddata from a CDN, or claims that another profile was used. If a selected
 combination is absent, it displays:
@@ -76,6 +82,12 @@ Existing files are retained. Add `--force` to replace them explicitly:
 ```bash
 node scripts/download-ocr-models.mjs fast eng --force
 ```
+
+`--force` replaces the local file but does not invalidate traineddata already
+stored by Tesseract.js in the browser's IndexedDB cache. Before the next OCR
+run, either clear site data for the frontend origin or change
+`CONFIG.ocr.cachePrefix` in `frontend/config.js`. Otherwise the browser may
+continue using the previous cached model.
 
 Models are installed under:
 
@@ -256,6 +268,8 @@ visual-scan/
 ├── scripts/
 │   ├── download-ocr-models.mjs
 │   └── verify-ocr-models.mjs
+├── tests/
+│   └── ocr.test.mjs
 ├── public/
 │   └── sample-docs/
 ├── package.json

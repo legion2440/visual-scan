@@ -131,6 +131,12 @@ try {
 
   const { manifestPath } = await verifyOcrModels();
   console.log(`Updated ${path.relative(REPOSITORY_ROOT, manifestPath)}.`);
+  if (force) {
+    console.warn(
+      'Browser cache warning: --force does not invalidate Tesseract data already stored in IndexedDB.\n'
+      + 'Before the next OCR run, clear this site’s data or change CONFIG.ocr.cachePrefix.',
+    );
+  }
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

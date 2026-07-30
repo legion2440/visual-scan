@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visual Scan — document scanner</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+</head>
+<body>
+
+<aside class="protocol-warning" id="protocol-warning" role="alert" hidden>
+  <strong>Visual Scan must run through an HTTP server.</strong>
+  Opening <code>index.html</code> through <code>file://</code> blocks JavaScript modules.
+  From the repository root, run <code>python -m http.server 5500</code>, then open
+  <code>http://localhost:5500/frontend/index.html</code>.
+</aside>
+<script>
+  if (window.location.protocol === 'file:') {
+    document.getElementById('protocol-warning').hidden = false;
+  }
+</script>
+
+<header class="masthead">
+  <div class="rule-thick"></div>
+  <div class="masthead-row">
+    <h1 class="wordmark">Visual&nbsp;Scan</h1>
+    <p class="masthead-sub">Paper in, structured text out — OCR in the browser, with optional AI analysis from the backend.</p>
+  </div>
+  <div class="rule-thin"></div>
+  <div class="dateline">
+    <span id="dateline-date">—</span>
+    <span class="dateline-sep">·</span>
+    <span>Tesseract.js edition</span>
+    <div class="conn" id="conn">
+      <span class="dot" id="conn-dot" data-state="unknown"></span>
+      <span id="conn-label">Backend: checking…</span>
+      <button class="btn btn-ghost conn-test" id="conn-test" type="button">Test</button>
+    </div>
+  </div>
+  <div class="rule-thin"></div>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="Views">
+  <button class="tab" id="tab-scan" role="tab" aria-selected="true" aria-controls="panel-scan" data-panel="scan">
+    <span class="tab-num">01</span> Upload &amp; Scan
+  </button>
+  <button class="tab" id="tab-results" role="tab" aria-selected="false" aria-controls="panel-results" data-panel="results">
+    <span class="tab-num">02</span> Scanned Results <span class="tab-count" id="tab-count">0</span>
+  </button>
+</nav>
+
+<main>
+
+  <!-- ══ 01 · Upload & Scan ════════════════════════════════════════════ -->
+  <section class="panel scan-grid" id="panel-scan" role="tabpanel" aria-labelledby="tab-scan">
+
+    <div class="col">
+      <p class="step">Step one</p>
+      <h2>Capture the page</h2>
+      <p class="lede">Drop a photograph or a scan, or take one with the camera. Straighten and clean it up before reading — Tesseract is far more accurate on flat, high-contrast type.</p>
+
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose an image or drop one here">
+        <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
+        <p class="dropzone-title">Drop an image here</p>
+        <p class="dropzone-sub text-muted">JPEG, PNG, WebP · or <span class="link-like">browse files</span></p>
+      </div>
+
+      <div class="row row-wrap">
+        <button class="btn btn-secondary" id="btn-camera" type="button">Use camera</button>
+        <button class="btn btn-secondary" id="btn-shoot" type="button" hidden>Take photo</button>
+        <button class="btn btn-ghost" id="btn-camera-stop" type="button" hidden>Stop camera</button>
+        <span class="spacer"></span>
+        <span class="text-muted samples-label">Samples:</span>
+        <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/invoice.jpg">invoice</button>
+        <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/contract.jpg">contract</button>
+        <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/note.jpg">note</button>
+      </div>
+
+      <figure class="stage" id="stage" hidden>
+        <div class="stage-plate halftone">
+          <canvas id="preview"></canvas>
+          <canvas id="overlay" class="overlay"></canvas>
+          <video id="video" playsinline muted hidden></video>
+        </div>
+        <figcaption id="stage-caption">—</figcaption>
+      </figure>
+
+      <div class="tools" id="tools" hidden>
+        <div class="tool-group" role="group" aria-label="Geometry">
+          <button class="btn btn-secondary" id="btn-rot-l" type="button" title="Rotate 90° left">⟲ 90°</button>
+          <button class="btn btn-secondary" id="btn-rot-r" type="button" title="Rotate 90° right">⟳ 90°</button>
+          <label class="tool-range">
+            <span>Deskew <output id="out-skew">0°</output></span>
+            <input type="range" id="rng-skew" min="-10" max="10" step="0.5" value="0">
+          </label>
+        </div>
+
+        <div class="tool-group" role="group" aria-label="Cropping">
+          <button class="btn btn-secondary" id="btn-crop" type="button" aria-pressed="false">Crop</button>
+          <button class="btn btn-primary" id="btn-crop-apply" type="button" disabled>Apply crop</button>
+          <button class="btn btn-ghost" id="btn-reset" type="button">Reset image</button>
+        </div>
+
+        <div class="tool-group" role="group" aria-label="Preprocessing">
+          <label class="check"><input type="checkbox" id="chk-gray"> <span>Grayscale</span></label>
+          <label class="check"><input type="checkbox" id="chk-thresh"> <span>Threshold</span></label>
+          <label class="tool-range">
+            <span>Level <output id="out-thresh">160</output></span>
+            <input type="range" id="rng-thresh" min="40" max="230" step="1" value="160" disabled>
+          </label>
+          <label class="check"><input type="checkbox" id="chk-invert"> <span>Invert</span></label>
+        </div>
+      </div>
+
+      <div class="run" id="run" hidden>
+        <div class="run-row">
+          <div class="field field-inline">
+            <label for="sel-lang">OCR language</label>
+            <select class="input" id="sel-lang"></select>
+          </div>
+          <button class="btn btn-primary" id="btn-ocr" type="button">Extract text</button>
+        </div>
+        <div class="progress" id="progress" hidden>
+          <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+          <p class="progress-label" id="progress-label">Preparing…</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <p class="step">Step two</p>
+      <h2>Read &amp; understand</h2>
+      <p class="lede">The recognised text is editable — fix an OCR slip before you send it on. Then let the API classify the document and write the summary.</p>
+
+      <div class="text-head">
+        <h6>Extracted text</h6>
+        <span class="text-meta text-muted" id="text-meta">no text yet</span>
+      </div>
+      <textarea class="input text-area" id="ocr-text" spellcheck="false"
+        placeholder="Recognised text appears here, and stays editable."></textarea>
+
+      <div class="row row-wrap">
+        <button class="btn btn-primary" id="btn-analyze" type="button" disabled>Classify &amp; summarise</button>
+        <button class="btn btn-secondary" id="btn-save" type="button" disabled>Save to results</button>
+        <button class="btn btn-ghost" id="btn-copy" type="button" disabled>Copy text</button>
+      </div>
+
+      <p class="notice" id="notice" hidden></p>
+
+      <section class="ai" id="ai" hidden aria-live="polite">
+        <div class="ai-head">
+          <h6>AI analysis</h6>
+          <span class="tag tag-accent-2" id="ai-source">AI provider</span>
+        </div>
+
+        <div class="ai-class">
+          <p class="ai-class-label">Classified as</p>
+          <p class="ai-class-value" id="ai-class">—</p>
+          <p class="ai-conf text-muted" id="ai-conf">—</p>
+        </div>
+
+        <div class="card ai-summary">
+          <p class="card-kicker">Summary</p>
+          <p class="card-body" id="ai-summary">—</p>
+        </div>
+
+        <div class="ai-fields" id="ai-fields-wrap" hidden>
+          <h6>Extracted fields</h6>
+          <dl class="fields" id="ai-fields"></dl>
+        </div>
+
+        <div class="ai-tags" id="ai-tags-wrap" hidden>
+          <h6>Tags</h6>
+          <div class="row row-wrap" id="ai-tags"></div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ══ 02 · Scanned results ══════════════════════════════════════════ -->
+  <section class="panel" id="panel-results" role="tabpanel" aria-labelledby="tab-results" hidden>
+    <div class="results-head">
+      <div>
+        <p class="step">Archive</p>
+        <h2>Scanned results</h2>
+      </div>
+      <p class="lede results-lede">Every processed document, newest first. Click a column heading to sort; the search box matches filename, text, classification and tags.</p>
+    </div>
+
+    <div class="results-controls">
+      <div class="field field-grow">
+        <label for="q">Search</label>
+        <input class="input" id="q" type="search" placeholder="Total, invoice, 2026…">
+      </div>
+      <div class="field">
+        <label for="filter-class">Classification</label>
+        <select class="input" id="filter-class"><option value="all">All</option></select>
+      </div>
+      <div class="results-actions">
+        <button class="btn btn-secondary" id="btn-export" type="button">Export JSON</button>
+        <button class="btn btn-ghost" id="btn-clear" type="button">Clear archive</button>
+      </div>
+    </div>
+
+    <p class="results-count text-muted" id="results-count">0 documents</p>
+
+    <div class="table-wrap">
+      <table class="table" id="results-table">
+        <thead>
+          <tr>
+            <th class="sortable" data-key="filename" scope="col">Filename</th>
+            <th class="sortable" data-key="scanned_at" scope="col">Date scanned</th>
+            <th scope="col">Extracted text</th>
+            <th class="sortable" data-key="classification" scope="col">Classification</th>
+            <th scope="col">Summary</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+      <p class="empty" id="results-empty">Nothing scanned yet. Start on the <button class="btn btn-ghost" type="button" data-goto="scan">Upload&nbsp;&amp;&nbsp;Scan</button> tab.</p>
+    </div>
+  </section>
+</main>
+
+<!-- document detail -->
+<div class="dialog-backdrop" id="detail" hidden>
+  <div class="dialog dialog-wide" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+    <div class="dialog-head">
+      <div>
+        <p class="card-kicker" id="detail-kicker">—</p>
+        <h3 class="dialog-title" id="detail-title">—</h3>
+      </div>
+      <button class="btn btn-ghost" id="detail-close" type="button">Close</button>
+    </div>
+    <div class="dialog-body detail-grid">
+      <figure class="detail-figure halftone" id="detail-figure"><img id="detail-img" alt="Scanned page"></figure>
+      <div>
+        <div class="card ai-summary">
+          <p class="card-kicker">Summary</p>
+          <p class="card-body" id="detail-summary">—</p>
+        </div>
+        <dl class="fields" id="detail-fields"></dl>
+        <h6 class="detail-text-head">Full text</h6>
+        <pre class="detail-text" id="detail-text">—</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer class="footer">
+  <div class="rule-thin"></div>
+  <p class="text-muted">Frontend only — vanilla JS, no build step. OCR runs in the browser; optional AI analysis uses <code>POST /api/ai/analyze</code>.</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

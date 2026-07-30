@@ -1,0 +1,10 @@
+# Generated and temporary project artifacts
+_ds/
+uploads/
+.thumbnail
+*.tmp
+*.temp
+
+# Common operating-system files
+.DS_Store
+Thumbs.db

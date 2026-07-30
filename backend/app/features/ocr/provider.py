@@ -115,6 +115,8 @@ class TesseractProvider:
             )
         except TesseractNotFoundError as error:
             raise OcrEngineUnavailableError() from error
+        except SystemExit as error:
+            raise OcrEngineUnavailableError() from error
         except TesseractError as error:
             message = " ".join(str(part) for part in error.args).lower()
             if any(marker in message for marker in _MISSING_LANGUAGE_MARKERS):

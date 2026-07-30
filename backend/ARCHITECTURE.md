@@ -68,11 +68,11 @@ HTTP multipart upload
   checks pixel limits before full decoding, verifies the image, applies EXIF
   orientation, and returns an in-memory Pillow image.
 - The provider owns the single `pytesseract.image_to_data()` call and
-  normalizes Tesseract availability and timeout failures.
+  normalizes Tesseract availability, version, and timeout failures.
 
-The application does not persist uploaded originals and does not create its
-own temporary files. FastAPI's multipart parser may use system temporary
-storage through `SpooledTemporaryFile`.
+Visual Scan does not persist uploaded originals or create application-managed
+temporary files. FastAPI's multipart parser and pytesseract may use system
+temporary storage; pytesseract cleans up the files it creates after OCR.
 
 The module map is the navigation source for agents and maintainers. A
 dependency graph generator will be considered after OCR, analysis, and scans

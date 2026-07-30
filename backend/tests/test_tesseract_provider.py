@@ -106,6 +106,30 @@ def test_provider_normalizes_tesseract_failures(
     assert "native failure" not in str(captured.value).lower()
 
 
+def test_invalid_tesseract_version_is_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_version_check(*args: Any, **kwargs: Any) -> None:
+        raise SystemExit(r'Invalid tesseract version: "private build output"')
+
+    monkeypatch.setattr(
+        provider_module.pytesseract,
+        "image_to_data",
+        fail_version_check,
+    )
+    provider = TesseractProvider(timeout_seconds=45)
+
+    with (
+        Image.new("RGB", (1, 1)) as image,
+        pytest.raises(OcrEngineUnavailableError) as captured,
+    ):
+        provider.recognize(image, "eng")
+
+    expected_message = "Tesseract or the selected language data is not available."
+    assert str(captured.value) == expected_message
+    assert "private build output" not in str(captured.value)
+
+
 def test_custom_tesseract_command_is_configured_once_without_launching(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

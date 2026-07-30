@@ -292,10 +292,10 @@ also rejects an empty or corrupt upload, an unsupported MIME type, and any
 mismatch between the declared MIME type and the decoded image format. Pillow
 decompression-bomb warnings and errors are returned as HTTP 413.
 
-The application does not save an uploaded original and does not create its own
-temporary files. FastAPI's multipart parser uses `SpooledTemporaryFile`, so it
-may place a large multipart part in system temporary storage before the
-endpoint runs. Strict zero-disk upload handling is outside this step.
+Visual Scan does not save uploaded originals or create application-managed
+temporary files. FastAPI's multipart parser and pytesseract may use system
+temporary storage; pytesseract cleans up the files it creates after OCR.
+Strict zero-disk upload handling is outside this step.
 
 ## Pinned browser dependencies
 

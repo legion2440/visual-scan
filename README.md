@@ -22,7 +22,9 @@ fast/standard/best OCR model sets are intentionally outside this step.
 - Two views: **Upload & Scan** and **Scanned Results**.
 
 The results archive uses `localStorage`. It is not synchronized with a backend
-in this step.
+in this step. If the browser storage quota is reached, Visual Scan retries the
+new record without its image preview. Existing records and previews are never
+removed automatically.
 
 ## Run locally
 
@@ -74,6 +76,10 @@ The interface reports unsupported formats, oversized or invalid images,
 camera errors, OCR failures, and an unavailable backend. Backend availability
 does not affect upload, camera capture, Canvas preprocessing, browser OCR, or
 the local results archive.
+
+The backend indicator reports network reachability only. A received HTTP error
+still means the backend is reachable; only a network failure or timeout marks
+it as unavailable. AI request errors are displayed separately.
 
 ## Pinned dependencies
 

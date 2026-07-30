@@ -9,8 +9,10 @@
 import * as IU from './utils/imageUtils.js';
 import { CONFIG } from './config.js';
 import { recognize, shutdown, LANGUAGES } from './utils/ocr.js';
-import { api } from './utils/api.js';
-import { store, newId, snippet, formatDate, view, classifications } from './utils/store.js';
+import { api, ApiError } from './utils/api.js';
+import {
+  store, StorageError, newId, snippet, formatDate, view, classifications,
+} from './utils/store.js';
 
 const el = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -58,7 +60,7 @@ function paintConnection() {
   const label = el('conn-label');
   if (state.backend === 'up') {
     dot.dataset.state = 'up';
-    label.textContent = 'Backend: connected';
+    label.textContent = 'Backend: reachable';
   } else if (state.backend === 'down') {
     dot.dataset.state = 'down';
     label.textContent = 'Backend: unavailable';
@@ -68,14 +70,18 @@ function paintConnection() {
   }
 }
 
+function setBackendFromApiError(error) {
+  state.backend = error instanceof ApiError && error.status > 0 ? 'up' : 'down';
+}
+
 async function checkBackend() {
   state.backend = 'unknown';
   paintConnection();
   try {
     await api.health();
     state.backend = 'up';
-  } catch {
-    state.backend = 'down';
+  } catch (error) {
+    setBackendFromApiError(error);
   }
   paintConnection();
 }
@@ -473,7 +479,7 @@ el('btn-analyze').addEventListener('click', async () => {
     state.ai = result;
     paintAI(result);
   } catch (error) {
-    state.backend = 'down';
+    setBackendFromApiError(error);
     paintConnection();
     notice(`AI analysis is unavailable: ${error.message} Your image and OCR text are unchanged.`, 'error');
   } finally {
@@ -506,6 +512,26 @@ function paintAI(r) {
 
 /* ── saving ───────────────────────────────────────────────────────────── */
 
+function persistScan(scan) {
+  try {
+    return { scans: store.add(scan), savedWithoutThumbnail: false };
+  } catch (error) {
+    if (!(error instanceof StorageError && error.quotaExceeded && scan.thumbnail)) throw error;
+    return {
+      scans: store.add({ ...scan, thumbnail: null }),
+      savedWithoutThumbnail: true,
+    };
+  }
+}
+
+function reportStorageError(error, action) {
+  if (error instanceof StorageError && error.quotaExceeded) {
+    notice('Browser storage is full. Export or clear the archive, then try again.', 'error');
+    return;
+  }
+  notice(`Could not ${action} because browser storage is unavailable. Check its permissions and try again.`, 'error');
+}
+
 el('btn-save').addEventListener('click', () => {
   const text = el('ocr-text').value.trim();
   if (!text) return;
@@ -527,9 +553,19 @@ el('btn-save').addEventListener('click', () => {
     thumbnail: state.geom ? IU.makeThumbnail(state.geom, 320) : null,
   };
 
-  state.scans = store.add(scan);
-  renderResults();
-  notice('Saved to the local results archive.', 'ok');
+  try {
+    const result = persistScan(scan);
+    state.scans = result.scans;
+    renderResults();
+    notice(
+      result.savedWithoutThumbnail
+        ? 'Saved without image preview.'
+        : 'Saved to the local results archive.',
+      'ok',
+    );
+  } catch (error) {
+    reportStorageError(error, 'save this result');
+  }
 });
 
 /* ── results table ────────────────────────────────────────────────────── */
@@ -554,8 +590,13 @@ el('btn-export').addEventListener('click', () => {
 el('btn-clear').addEventListener('click', () => {
   if (!state.scans.length) return;
   if (!confirm('Remove every saved scan from this browser?')) return;
-  state.scans = store.clear();
-  renderResults();
+  try {
+    const scans = store.clear();
+    state.scans = scans;
+    renderResults();
+  } catch (error) {
+    reportStorageError(error, 'clear the archive');
+  }
 });
 
 function renderResults() {
@@ -603,8 +644,13 @@ el('results-body').addEventListener('click', (e) => {
   const scan = state.scans.find((s) => s.id === btn.dataset.id);
   if (!scan) return;
   if (btn.dataset.act === 'open') return openDetail(scan);
-  state.scans = store.remove(scan.id);
-  renderResults();
+  try {
+    const scans = store.remove(scan.id);
+    state.scans = scans;
+    renderResults();
+  } catch (error) {
+    reportStorageError(error, 'delete this result');
+  }
 });
 
 /* ── detail dialog ────────────────────────────────────────────────────── */

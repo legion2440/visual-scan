@@ -5,6 +5,32 @@
 
 const KEY = 'visual-scan.scans';
 
+export class StorageError extends Error {
+  constructor(message, { quotaExceeded = false, cause } = {}) {
+    super(message);
+    this.name = 'StorageError';
+    this.quotaExceeded = quotaExceeded;
+    this.cause = cause;
+  }
+}
+
+function isQuotaExceeded(error) {
+  return Boolean(error && (
+    error.name === 'QuotaExceededError'
+    || error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || error.code === 22
+    || error.code === 1014
+  ));
+}
+
+function normalizeStorageError(error) {
+  const quotaExceeded = isQuotaExceeded(error);
+  return new StorageError(
+    quotaExceeded ? 'Browser storage quota exceeded.' : 'Browser storage is unavailable.',
+    { quotaExceeded, cause: error },
+  );
+}
+
 export const store = {
   all() {
     try {
@@ -15,8 +41,12 @@ export const store = {
     }
   },
   replaceAll(items) {
-    localStorage.setItem(KEY, JSON.stringify(items));
-    return items;
+    try {
+      localStorage.setItem(KEY, JSON.stringify(items));
+      return items;
+    } catch (error) {
+      throw normalizeStorageError(error);
+    }
   },
   add(scan) {
     const items = [scan, ...store.all().filter((s) => s.id !== scan.id)];
@@ -26,8 +56,12 @@ export const store = {
     return store.replaceAll(store.all().filter((s) => s.id !== id));
   },
   clear() {
-    localStorage.removeItem(KEY);
-    return [];
+    try {
+      localStorage.removeItem(KEY);
+      return [];
+    } catch (error) {
+      throw normalizeStorageError(error);
+    }
   },
 };
 

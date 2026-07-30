@@ -71,7 +71,9 @@ function paintConnection() {
 }
 
 function setBackendFromApiError(error) {
-  state.backend = error instanceof ApiError && error.status > 0 ? 'up' : 'down';
+  if (error instanceof ApiError) {
+    state.backend = error.status > 0 ? 'up' : 'down';
+  }
 }
 
 async function checkBackend() {

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "application": {
+    "entrypoint": "backend/app/main.py",
+    "api_router": "backend/app/api/router.py"
+  },
+  "features": {
+    "health": {
+      "entrypoint": "backend/app/features/health/router.py",
+      "contracts": [
+        "backend/app/features/health/schemas.py"
+      ],
+      "owns": [
+        "backend health reporting"
+      ],
+      "depends_on": [],
+      "tests": [
+        "backend/tests/test_health.py"
+      ]
+    }
+  }
+}

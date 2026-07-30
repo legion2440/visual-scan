@@ -1,12 +1,13 @@
-# Visual Scan — frontend
+# Visual Scan
 
-Visual Scan is a standalone Vanilla JavaScript document-scanning frontend. It
-accepts a document image or camera capture, lets the user prepare the page on a
+Visual Scan combines a standalone Vanilla JavaScript document-scanning
+frontend with a minimal FastAPI backend foundation. The frontend accepts a
+document image or camera capture, lets the user prepare the page on a
 `<canvas>`, and extracts editable text with Tesseract.js in the browser.
 
-This repository currently contains the frontend only. Backend analysis,
-server-side OCR, database storage, authentication, and Docker are outside this
-step.
+The backend currently reports health and establishes the module boundaries for
+future OCR, analysis, and storage features. Server-side OCR, AI analysis,
+database storage, authentication, and Docker are not implemented yet.
 
 ## Features
 
@@ -19,6 +20,7 @@ step.
 - English, Russian, English + Russian, German, French, and Spanish selections.
 - Editable extracted text.
 - Optional AI analysis request to a configured backend.
+- FastAPI application factory with CORS and `GET /api/health`.
 - Local results archive with sorting, search, classification filtering,
   detail view, deletion, and JSON export.
 - Two views: **Upload & Scan** and **Scanned Results**.
@@ -118,7 +120,39 @@ same profile directory. A missing manifest does not break image loading,
 Canvas tools, local storage, or optional backend calls; OCR selectors remain
 unavailable until models are installed and the manifest is generated.
 
-## Run locally
+## Backend setup and run
+
+Python 3.11 or newer is required. From the repository root, install the backend
+and its development tools:
+
+```bash
+python -m pip install -e "./backend[dev]"
+```
+
+`backend/.env` is optional. When present, it is always loaded relative to the
+backend package rather than the current working directory. Start the API:
+
+```bash
+python -m uvicorn app.main:app --app-dir backend --reload
+```
+
+Check the health contract:
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok",
+  "ai_available": false,
+  "provider": null
+}
+```
+
+## Frontend run
 
 Serve the repository root over HTTP:
 
@@ -139,7 +173,31 @@ detected.
 Camera capture normally works on `localhost` or another secure origin. The
 browser still asks the user for permission.
 
-## Configuration
+With both servers running, the frontend connection indicator reports
+`Backend: reachable`.
+
+## Backend configuration
+
+Backend settings use the `VISUAL_SCAN_` environment prefix. Copy values from
+`backend/.env.example` into `backend/.env` when overrides are needed. Available
+settings cover:
+
+- application name and version;
+- environment name;
+- API prefix;
+- CORS origins;
+- documented host and port.
+
+`VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
+
+```dotenv
+VISUAL_SCAN_CORS_ORIGINS=["http://localhost:5500","http://127.0.0.1:5500"]
+```
+
+The default allowed frontend origins are `http://localhost:5500` and
+`http://127.0.0.1:5500`.
+
+## Frontend configuration
 
 Browser/runtime settings have one source of truth:
 
@@ -190,9 +248,9 @@ https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1
 Traineddata never falls back to a CDN. It is loaded uncompressed from the
 selected local profile with `gzip: false` and OEM 1.
 
-## Future backend contract
+## Backend API
 
-The frontend currently reserves two JSON endpoints:
+The implemented endpoint is:
 
 ```http
 GET /api/health
@@ -203,52 +261,55 @@ Example response:
 ```json
 {
   "status": "ok",
-  "ai_available": true,
-  "provider": "provider-name"
+  "ai_available": false,
+  "provider": null
 }
 ```
 
-```http
-POST /api/ai/analyze
-Content-Type: application/json
+`POST /api/ai/analyze` is intentionally absent. Until the analysis feature is
+implemented, that request receives HTTP 404. The frontend treats a received
+HTTP response as proof that the backend is reachable and keeps local image/OCR
+processing available.
+
+## Tests and checks
+
+Run backend tests and static checks from the repository root:
+
+```bash
+python -m pytest backend/tests
+python -m ruff check backend
+python -m ruff format --check backend
+python -m compileall backend/app backend/tests
 ```
 
-Example request:
-
-```json
-{
-  "filename": "invoice.jpg",
-  "text": "Recognised document text",
-  "language": "eng"
-}
-```
-
-Example response:
-
-```json
-{
-  "filename": "invoice.jpg",
-  "classification": "invoice",
-  "confidence": 0.93,
-  "summary": "Short document summary.",
-  "tags": ["billing"],
-  "fields": [
-    {
-      "label": "Total",
-      "value": "1012.80 GBP"
-    }
-  ],
-  "provider": "provider-name"
-}
-```
-
-The frontend displays the provider value returned by the backend. No provider
-name is hard-coded in the interface.
+The module-map tests reject duplicate JSON keys, absolute or non-POSIX paths,
+parent traversal, paths that resolve outside the repository, and references to
+missing files.
 
 ## Structure
 
 ```text
 visual-scan/
+├── AGENTS.md
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   │   └── router.py
+│   │   ├── core/
+│   │   │   └── config.py
+│   │   ├── features/
+│   │   │   └── health/
+│   │   │       ├── router.py
+│   │   │       └── schemas.py
+│   │   └── main.py
+│   ├── tests/
+│   │   ├── conftest.py
+│   │   ├── test_health.py
+│   │   └── test_module_map.py
+│   ├── .env.example
+│   ├── ARCHITECTURE.md
+│   ├── module-map.json
+│   └── pyproject.toml
 ├── frontend/
 │   ├── assets/
 │   │   └── tessdata/
@@ -279,6 +340,11 @@ visual-scan/
 
 ### Module responsibilities
 
+- `backend/app/main.py` owns the FastAPI application factory.
+- `backend/app/api/router.py` composes public feature routers.
+- `backend/app/core/config.py` owns environment-backed settings.
+- `backend/app/features/health` owns the health contract and endpoint.
+- `backend/module-map.json` is the backend navigation and ownership index.
 - `app.js` connects the interface, state, and user actions.
 - `config.js` contains browser/runtime URLs and safety limits.
 - `ocrProfiles.js` is the shared pure OCR registry.

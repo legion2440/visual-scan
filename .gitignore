@@ -10,6 +10,18 @@ frontend/assets/tessdata/**/*.traineddata
 frontend/assets/tessdata/**/*.traineddata.gz
 frontend/assets/tessdata/manifest.json
 
+# Python environments, caches, and local settings
+backend/.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Common operating-system files
 .DS_Store
 Thumbs.db

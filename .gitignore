@@ -5,6 +5,11 @@ uploads/
 *.tmp
 *.temp
 
+# OCR models are installed locally; availability is machine-specific
+frontend/assets/tessdata/**/*.traineddata
+frontend/assets/tessdata/**/*.traineddata.gz
+frontend/assets/tessdata/manifest.json
+
 # Common operating-system files
 .DS_Store
 Thumbs.db

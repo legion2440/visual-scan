@@ -119,8 +119,15 @@
             <label for="sel-lang">OCR language</label>
             <select class="input" id="sel-lang"></select>
           </div>
+          <div class="field field-inline">
+            <label for="sel-model">OCR model</label>
+            <select class="input" id="sel-model"></select>
+          </div>
           <button class="btn btn-primary" id="btn-ocr" type="button">Extract text</button>
         </div>
+        <p class="model-status text-muted" id="model-status" role="status">
+          Checking local OCR models…
+        </p>
         <div class="progress" id="progress" hidden>
           <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
           <p class="progress-label" id="progress-label">Preparing…</p>
@@ -251,7 +258,7 @@
 
 <footer class="footer">
   <div class="rule-thin"></div>
-  <p class="text-muted">Frontend only — vanilla JS, no build step. OCR runs in the browser; optional AI analysis uses <code>POST /api/ai/analyze</code>.</p>
+  <p class="text-muted">Frontend only — vanilla JS, no build step. OCR uses explicitly installed local model files; optional AI analysis uses <code>POST /api/ai/analyze</code>.</p>
 </footer>
 
 <script type="module" src="app.js"></script>

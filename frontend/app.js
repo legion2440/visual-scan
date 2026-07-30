@@ -8,7 +8,18 @@
 
 import * as IU from './utils/imageUtils.js';
 import { CONFIG } from './config.js';
-import { recognize, shutdown, LANGUAGES } from './utils/ocr.js';
+import {
+  availableLanguagesForProfile,
+  isOcrCombinationAvailable,
+  LANGUAGES,
+  loadOcrAvailability,
+  OCR_MODEL_NOT_INSTALLED_MESSAGE,
+  OcrModelError,
+  PROFILES,
+  recognize,
+  releaseWorkerForSelection,
+  shutdown,
+} from './utils/ocr.js';
 import { api, ApiError } from './utils/api.js';
 import {
   store, StorageError, newId, snippet, formatDate, view, classifications,
@@ -34,6 +45,8 @@ const state = {
   scans: [],
   sort: { key: 'scanned_at', dir: -1 },
   backend: 'unknown',      // 'up' | 'down' | 'unknown'
+  ocrManifest: Object.fromEntries(PROFILES.map((profile) => [profile.id, []])),
+  ocrBusy: false,
 };
 
 /* ── tabs ─────────────────────────────────────────────────────────────── */
@@ -178,6 +191,7 @@ function adoptImage(img, file) {
   el('tools').hidden = false;
   el('run').hidden = false;
   render();
+  syncOcrControls();
   notice(`Loaded ${file.name}. Straighten and clean up, then extract the text.`, 'info');
   return true;
 }
@@ -401,7 +415,100 @@ el('btn-crop-apply').addEventListener('click', () => {
 
 /* ── OCR ──────────────────────────────────────────────────────────────── */
 
+el('sel-model').innerHTML = PROFILES
+  .map((profile) => `<option value="${profile.id}">${profile.label}</option>`)
+  .join('');
+el('sel-model').value = CONFIG.ocr.defaultProfile;
 el('sel-lang').innerHTML = LANGUAGES.map((l) => `<option value="${l.code}">${l.label}</option>`).join('');
+el('sel-lang').value = 'eng';
+
+function selectedOcrCombinationAvailable() {
+  return isOcrCombinationAvailable(
+    state.ocrManifest,
+    el('sel-model').value,
+    el('sel-lang').value,
+  );
+}
+
+function syncOcrControls() {
+  const available = selectedOcrCombinationAvailable();
+  const anyProfileAvailable = PROFILES.some(
+    (profile) => availableLanguagesForProfile(state.ocrManifest, profile.id).length > 0,
+  );
+  const selectedProfileAvailable = availableLanguagesForProfile(
+    state.ocrManifest,
+    el('sel-model').value,
+  ).length > 0;
+
+  el('sel-model').disabled = state.ocrBusy || !anyProfileAvailable;
+  el('sel-lang').disabled = state.ocrBusy || !selectedProfileAvailable;
+  el('btn-ocr').disabled = state.ocrBusy || !state.processed || !available;
+}
+
+function paintOcrAvailability({ selectFirstLanguage = false } = {}) {
+  for (const option of el('sel-model').options) {
+    option.disabled = availableLanguagesForProfile(
+      state.ocrManifest,
+      option.value,
+    ).length === 0;
+  }
+
+  const profileId = el('sel-model').value;
+  const availableLanguages = availableLanguagesForProfile(state.ocrManifest, profileId);
+  if (
+    selectFirstLanguage
+    && !availableLanguages.includes(el('sel-lang').value)
+    && availableLanguages.length
+  ) {
+    el('sel-lang').value = availableLanguages[0];
+  }
+
+  for (const option of el('sel-lang').options) {
+    option.disabled = !isOcrCombinationAvailable(
+      state.ocrManifest,
+      profileId,
+      option.value,
+    );
+  }
+
+  const status = el('model-status');
+  if (selectedOcrCombinationAvailable()) {
+    const profile = PROFILES.find((item) => item.id === profileId);
+    const language = LANGUAGES.find((item) => item.code === el('sel-lang').value);
+    status.textContent = `${profile.label} · ${language.label} · local traineddata`;
+    status.dataset.state = 'ready';
+  } else {
+    status.textContent = OCR_MODEL_NOT_INSTALLED_MESSAGE;
+    status.dataset.state = 'missing';
+  }
+
+  syncOcrControls();
+}
+
+async function loadOcrModels() {
+  const availability = await loadOcrAvailability();
+  state.ocrManifest = availability.manifest;
+  paintOcrAvailability();
+}
+
+async function applyOcrSelectionChange({ profileChanged = false } = {}) {
+  paintOcrAvailability({ selectFirstLanguage: profileChanged });
+  state.ocrBusy = true;
+  syncOcrControls();
+  try {
+    await releaseWorkerForSelection(el('sel-model').value, el('sel-lang').value);
+  } finally {
+    state.ocrBusy = false;
+    syncOcrControls();
+  }
+}
+
+el('sel-model').addEventListener('change', () => {
+  applyOcrSelectionChange({ profileChanged: true });
+});
+el('sel-lang').addEventListener('change', () => {
+  applyOcrSelectionChange();
+});
 
 el('btn-ocr').addEventListener('click', async () => {
   if (!state.processed) {
@@ -409,23 +516,36 @@ el('btn-ocr').addEventListener('click', async () => {
     return;
   }
   const lang = el('sel-lang').value;
-  const btn = el('btn-ocr');
-  btn.disabled = true;
+  const profile = el('sel-model').value;
+  state.ocrBusy = true;
+  syncOcrControls();
   showProgress(0, 'Loading the OCR engine…');
   try {
     const result = await recognize(state.processed, {
       lang,
+      profile,
       onProgress: ({ status, progress }) => showProgress(progress, status),
     });
     state.ocr = result;
     el('ocr-text').value = result.text;
     syncTextState();
     if (!result.text) notice('No text was recognised. Try cropping tighter, or turn on grayscale + threshold.', 'error');
-    else notice(`Recognised ${result.text.split(/\s+/).filter(Boolean).length} words${result.confidence ? ` at ${result.confidence}% confidence` : ''}.`, 'ok');
+    else notice(
+      `Recognised ${result.text.split(/\s+/).filter(Boolean).length} words`
+      + `${result.confidence ? ` at ${result.confidence}% confidence` : ''} `
+      + `with ${result.profileLabel} (${result.languageLabel}).`,
+      'ok',
+    );
   } catch (error) {
-    notice(`OCR failed: ${error.message || 'Unknown OCR error.'}`, 'error');
+    notice(
+      error instanceof OcrModelError
+        ? error.message
+        : `OCR failed: ${error.message || 'Unknown OCR error.'}`,
+      'error',
+    );
   } finally {
-    btn.disabled = false;
+    state.ocrBusy = false;
+    syncOcrControls();
     hideProgress();
   }
 });
@@ -447,8 +567,16 @@ el('ocr-text').addEventListener('input', syncTextState);
 function syncTextState() {
   const text = el('ocr-text').value.trim();
   const words = text ? text.split(/\s+/).length : 0;
+  const ocrDetails = state.ocr
+    ? [
+      state.ocr.engine,
+      state.ocr.confidence ? `OCR ${state.ocr.confidence}%` : '',
+      state.ocr.profileLabel,
+      state.ocr.languageLabel,
+    ].filter(Boolean).join(' · ')
+    : '';
   el('text-meta').textContent = text
-    ? `${words} words · ${text.length} characters${state.ocr && state.ocr.confidence ? ` · OCR ${state.ocr.confidence}%` : ''}`
+    ? `${words} words · ${text.length} characters${ocrDetails ? ` · ${ocrDetails}` : ''}`
     : 'no text yet';
   el('btn-analyze').disabled = !text;
   el('btn-copy').disabled = !text;
@@ -550,7 +678,12 @@ el('btn-save').addEventListener('click', () => {
     tags: ai.tags || [],
     fields: ai.fields || [],
     ocr: state.ocr ? {
-      engine: state.ocr.engine, lang: state.ocr.lang, confidence: state.ocr.confidence,
+      engine: state.ocr.engine,
+      lang: state.ocr.lang,
+      languageLabel: state.ocr.languageLabel,
+      profile: state.ocr.profile,
+      profileLabel: state.ocr.profileLabel,
+      confidence: state.ocr.confidence,
     } : null,
     thumbnail: state.geom ? IU.makeThumbnail(state.geom, 320) : null,
   };
@@ -627,7 +760,7 @@ function renderResults() {
     <tr data-id="${s.id}">
       <td class="cell-file">
         <button class="link-btn" data-act="open" data-id="${s.id}">${escapeHtml(s.filename)}</button>
-        ${s.ocr ? `<span class="cell-sub text-muted">${escapeHtml(s.ocr.engine)} · ${escapeHtml(s.ocr.lang)}</span>` : ''}
+        ${s.ocr ? `<span class="cell-sub text-muted">${escapeHtml(s.ocr.engine)} · ${escapeHtml(s.ocr.languageLabel || s.ocr.lang)}${s.ocr.profileLabel || s.ocr.profile ? ` · ${escapeHtml(s.ocr.profileLabel || s.ocr.profile)}` : ''}</span>` : ''}
       </td>
       <td class="cell-date">${formatDate(s.scanned_at)}</td>
       <td class="cell-snippet">${escapeHtml(snippet(s.text, 110))}</td>
@@ -710,3 +843,5 @@ renderResults();
 syncTextState();
 paintConnection();
 checkBackend();
+paintOcrAvailability();
+loadOcrModels();

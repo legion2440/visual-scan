@@ -1,0 +1,9 @@
+{
+  "name": "visual-scan",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "ocr:download": "node scripts/download-ocr-models.mjs",
+    "ocr:verify": "node scripts/verify-ocr-models.mjs"
+  }
+}

@@ -27,6 +27,10 @@ const ANALYSIS_LIMITS = Object.freeze({
   fieldValue: 5_000,
 });
 
+function codePointLength(value) {
+  return Array.from(value).length;
+}
+
 export class ArchiveContractError extends Error {
   constructor(message) {
     super(message);
@@ -115,7 +119,10 @@ export function validateAnalysisSnapshot(result) {
     throw new ArchiveContractError('AI analysis is not a valid archive snapshot.');
   }
   const tags = Array.isArray(result.tags) ? result.tags : [];
-  if (tags.some((tag) => typeof tag !== 'string' || tag.length > ANALYSIS_LIMITS.tag)) {
+  if (tags.some((tag) => (
+    typeof tag !== 'string'
+    || codePointLength(tag) > ANALYSIS_LIMITS.tag
+  ))) {
     throw new ArchiveContractError(
       `AI analysis contains a tag longer than ${ANALYSIS_LIMITS.tag} characters.`,
     );
@@ -125,14 +132,18 @@ export function validateAnalysisSnapshot(result) {
     !field
     || typeof field.label !== 'string'
     || typeof field.value !== 'string'
-    || field.label.length > ANALYSIS_LIMITS.fieldLabel
-    || field.value.length > ANALYSIS_LIMITS.fieldValue
+    || codePointLength(field.label) > ANALYSIS_LIMITS.fieldLabel
+    || codePointLength(field.value) > ANALYSIS_LIMITS.fieldValue
   ))) {
     throw new ArchiveContractError(
       'AI analysis contains a structured field that exceeds the archive limits.',
     );
   }
-  if (typeof result.provider !== 'string' || !result.provider.trim() || result.provider.length > 100) {
+  if (
+    typeof result.provider !== 'string'
+    || !result.provider.trim()
+    || codePointLength(result.provider.trim()) > 100
+  ) {
     throw new ArchiveContractError('AI analysis provider exceeds the archive limits.');
   }
   return {
@@ -166,6 +177,22 @@ export function buildScanPayload({
   };
 }
 
+export function parsePdfThreshold(preprocessing, rawValue) {
+  if (preprocessing !== 'threshold') return null;
+  if (String(rawValue).trim() === '') {
+    throw new ArchiveContractError(
+      'PDF threshold must be a whole number from 0 to 255.',
+    );
+  }
+  const threshold = Number(rawValue);
+  if (!Number.isInteger(threshold) || threshold < 0 || threshold > 255) {
+    throw new ArchiveContractError(
+      'PDF threshold must be a whole number from 0 to 255.',
+    );
+  }
+  return threshold;
+}
+
 export function listQuery({
   query = '',
   classification = 'all',
@@ -194,8 +221,12 @@ export function nextPageOffset(offset, limit, total) {
 }
 
 export function offsetAfterDelete(offset, limit, remainingTotal) {
-  if (remainingTotal <= 0) return 0;
-  return Math.min(offset, Math.floor((remainingTotal - 1) / limit) * limit);
+  return validPageOffset(offset, limit, remainingTotal);
+}
+
+export function validPageOffset(offset, limit, total) {
+  if (total <= 0) return 0;
+  return Math.min(offset, Math.floor((total - 1) / limit) * limit);
 }
 
 async function mapConcurrent(values, concurrency, mapper) {

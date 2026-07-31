@@ -13,8 +13,10 @@ import {
   mapServerPdfOcr,
   nextBackendState,
   offsetAfterDelete,
+  parsePdfThreshold,
   previousPageOffset,
   nextPageOffset,
+  validPageOffset,
 } from '../frontend/utils/archive.js';
 
 function currentAi(text = ' exact text ') {
@@ -103,6 +105,48 @@ test('AI snapshot over archive limits is rejected rather than truncated', () => 
   }), ArchiveContractError);
 });
 
+test('AI snapshot limits count Unicode code points instead of UTF-16 units', () => {
+  const { context, ai } = currentAi();
+  ai.result.tags = ['😀'.repeat(51)];
+  ai.result.fields = [{
+    label: '😀'.repeat(101),
+    value: '😀'.repeat(2_501),
+  }];
+  ai.result.provider = '😀'.repeat(51);
+
+  const payload = buildScanPayload({
+    filename: 'scan.png',
+    text: context.text,
+    ai,
+    analysisContext: context,
+    ocr: null,
+  });
+  assert.equal(Array.from(payload.analysis.tags[0]).length, 51);
+  assert.equal(Array.from(payload.analysis.fields[0].label).length, 101);
+  assert.equal(Array.from(payload.analysis.fields[0].value).length, 2_501);
+  assert.equal(Array.from(payload.analysis.provider).length, 51);
+});
+
+test('AI snapshot still rejects non-BMP metadata beyond code-point limits', () => {
+  const { context, ai } = currentAi();
+  ai.result.provider = '😀'.repeat(101);
+  assert.throws(() => buildScanPayload({
+    filename: 'scan.png',
+    text: context.text,
+    ai,
+    analysisContext: context,
+    ocr: null,
+  }), ArchiveContractError);
+});
+
+test('PDF threshold rejects an empty value before numeric conversion', () => {
+  assert.throws(() => parsePdfThreshold('threshold', ''), ArchiveContractError);
+  assert.throws(() => parsePdfThreshold('threshold', '   '), ArchiveContractError);
+  assert.equal(parsePdfThreshold('threshold', '0'), 0);
+  assert.equal(parsePdfThreshold('threshold', '160'), 160);
+  assert.equal(parsePdfThreshold('grayscale', ''), null);
+});
+
 test('OCR mappings preserve source and aggregate PDF word counts', () => {
   assert.deepEqual(mapBrowserOcr({
     engine: 'tesseract.js',
@@ -154,6 +198,9 @@ test('list query bounds text and deletion corrects the final-page offset', () =>
   assert.equal(query.q.length, 200);
   assert.equal(query.classification, 'invoice');
   assert.equal(offsetAfterDelete(50, 25, 50), 25);
+  assert.equal(validPageOffset(50, 25, 50), 25);
+  assert.equal(validPageOffset(50, 50, 50), 0);
+  assert.equal(validPageOffset(50, 25, 51), 50);
   assert.equal(previousPageOffset(0, 25), 0);
   assert.equal(previousPageOffset(50, 25), 25);
   assert.equal(nextPageOffset(0, 25, 51), 25);

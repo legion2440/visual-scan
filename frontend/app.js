@@ -35,8 +35,10 @@ import {
   nextBackendState,
   nextPageOffset,
   offsetAfterDelete,
+  parsePdfThreshold,
   previousPageOffset,
   snippet,
+  validPageOffset,
 } from './utils/archive.js';
 import { legacyStore, StorageError } from './utils/store.js';
 
@@ -893,9 +895,11 @@ async function runPdfOcr() {
     return;
   }
   const preprocessing = el('pdf-preprocessing').value;
-  const threshold = Number(el('pdf-threshold').value);
-  if (preprocessing === 'threshold' && (!Number.isInteger(threshold) || threshold < 0 || threshold > 255)) {
-    notice('PDF threshold must be a whole number from 0 to 255.', 'error');
+  let threshold;
+  try {
+    threshold = parsePdfThreshold(preprocessing, el('pdf-threshold').value);
+  } catch (error) {
+    notice(error.message, 'error');
     return;
   }
   const run = beginOcr();
@@ -1165,19 +1169,27 @@ async function loadArchive({ clearCache = false, quiet = false } = {}) {
   if (clearCache) state.archive.detailCache.clear();
   renderArchive();
   try {
-    const response = await api.listScans(listQuery(state.archive), {
+    const requestedOffset = state.archive.offset;
+    let response = await api.listScans(listQuery(state.archive), {
       signal: controller.signal,
     });
     if (revision !== state.archive.revision) return false;
     markBackendReachable();
-    if (
-      !response
-      || !Array.isArray(response.items)
-      || !Number.isInteger(response.total)
-      || !Number.isInteger(response.limit)
-      || !Number.isInteger(response.offset)
-    ) {
-      throw new TypeError('The archive list response is invalid.');
+    validateArchiveListResponse(response, requestedOffset);
+
+    const correctedOffset = validPageOffset(
+      requestedOffset,
+      response.limit,
+      response.total,
+    );
+    if (correctedOffset !== requestedOffset) {
+      state.archive.offset = correctedOffset;
+      response = await api.listScans(listQuery(state.archive), {
+        signal: controller.signal,
+      });
+      if (revision !== state.archive.revision) return false;
+      markBackendReachable();
+      validateArchiveListResponse(response, correctedOffset);
     }
     state.archive.items = response.items;
     state.archive.total = response.total;
@@ -1196,6 +1208,19 @@ async function loadArchive({ clearCache = false, quiet = false } = {}) {
       state.archive.controller = null;
       renderArchive();
     }
+  }
+}
+
+function validateArchiveListResponse(response, requestedOffset) {
+  if (
+    !response
+    || !Array.isArray(response.items)
+    || !Number.isInteger(response.total)
+    || !Number.isInteger(response.limit)
+    || !Number.isInteger(response.offset)
+    || response.offset !== requestedOffset
+  ) {
+    throw new TypeError('The archive list response is invalid.');
   }
 }
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -27,41 +25,8 @@ from app.features.ocr.schemas import OcrLanguage, PreprocessingMode
 from app.features.ocr.service import OcrService
 
 
-class FakePdfDocument:
-    """Return configured page images while recording pipeline order."""
-
-    def __init__(
-        self,
-        specs: tuple[PdfPageSpec, ...],
-        events: list[str],
-        rendered_images: list[Image.Image],
-        *,
-        preflight_error: Exception | None = None,
-    ) -> None:
-        self._specs = specs
-        self._events = events
-        self._rendered_images = rendered_images
-        self._preflight_error = preflight_error
-
-    def preflight(self, **kwargs: Any) -> tuple[PdfPageSpec, ...]:
-        self._events.append("preflight")
-        if self._preflight_error is not None:
-            raise self._preflight_error
-        assert kwargs["max_pages"] > 0
-        assert kwargs["max_page_pixels"] > 0
-        assert kwargs["max_total_pixels"] > 0
-        return self._specs
-
-    def render_page(self, spec: PdfPageSpec, **kwargs: Any) -> Image.Image:
-        self._events.append(f"render:{spec.index}")
-        image = Image.new("RGB", (spec.width, spec.height), (spec.index, 10, 20))
-        self._rendered_images.append(image)
-        assert kwargs["deadline"] > 0
-        return image
-
-
 class FakePdfRenderer:
-    """Expose a renderer-compatible context without calling PDFium."""
+    """Expose renderer-compatible operations without calling PDFium."""
 
     render_dpi = 300
 
@@ -72,31 +37,63 @@ class FakePdfRenderer:
         *,
         preflight_error: Exception | None = None,
     ) -> None:
-        self.events = events
+        self._specs = specs
+        self._events = events
+        self._preflight_error = preflight_error
         self.rendered_images: list[Image.Image] = []
-        self.document = FakePdfDocument(
-            specs,
-            events,
-            self.rendered_images,
-            preflight_error=preflight_error,
-        )
         self.lock_held = False
-        self.open_calls: list[dict[str, Any]] = []
+        self.preflight_calls: list[dict[str, Any]] = []
+        self.render_calls: list[dict[str, Any]] = []
 
-    @contextmanager
-    def open_document(
+    def preflight(
         self,
         data: bytes,
         password: str | None,
         *,
         deadline: float,
-    ) -> Iterator[FakePdfDocument]:
-        self.open_calls.append({"data": data, "password": password, "deadline": deadline})
-        self.events.append("open")
-        try:
-            yield self.document
-        finally:
-            self.events.append("close")
+        max_pages: int,
+        max_page_pixels: int,
+        max_total_pixels: int,
+    ) -> tuple[PdfPageSpec, ...]:
+        self.preflight_calls.append(
+            {
+                "data": data,
+                "password": password,
+                "deadline": deadline,
+                "max_pages": max_pages,
+                "max_page_pixels": max_page_pixels,
+                "max_total_pixels": max_total_pixels,
+            }
+        )
+        self._events.append("preflight")
+        if self._preflight_error is not None:
+            raise self._preflight_error
+        assert max_pages > 0
+        assert max_page_pixels > 0
+        assert max_total_pixels > 0
+        return self._specs
+
+    def render_page(
+        self,
+        data: bytes,
+        password: str | None,
+        spec: PdfPageSpec,
+        *,
+        deadline: float,
+    ) -> Image.Image:
+        self.render_calls.append(
+            {
+                "data": data,
+                "password": password,
+                "spec": spec,
+                "deadline": deadline,
+            }
+        )
+        self._events.append(f"render:{spec.index}")
+        image = Image.new("RGB", (spec.width, spec.height), (spec.index, 10, 20))
+        self.rendered_images.append(image)
+        assert deadline > 0
+        return image
 
 
 class FakeProvider:
@@ -200,7 +197,6 @@ def test_pdf_pipeline_preflights_all_pages_then_recognizes_in_order(
     )
 
     assert events == [
-        "open",
         "preflight",
         "render:0",
         "transform:0",
@@ -208,7 +204,6 @@ def test_pdf_pipeline_preflights_all_pages_then_recognizes_in_order(
         "render:1",
         "transform:1",
         "provider:1",
-        "close",
     ]
     assert result.text == "First page\n\n"
     assert result.page_count == 2
@@ -217,7 +212,8 @@ def test_pdf_pipeline_preflights_all_pages_then_recognizes_in_order(
     assert [(page.width, page.height) for page in result.pages] == [(4, 3), (3, 4)]
     assert [call["mode"] for call in provider.calls] == ["L", "L"]
     assert [call["language"] for call in provider.calls] == ["eng+rus", "eng+rus"]
-    assert renderer.open_calls[0]["password"] == "secret"
+    assert renderer.preflight_calls[0]["password"] == "secret"
+    assert all(call["password"] == "secret" for call in renderer.render_calls)
     for image in renderer.rendered_images:
         with pytest.raises(ValueError):
             image.getpixel((0, 0))
@@ -241,7 +237,7 @@ def test_pdf_pipeline_does_not_render_or_recognize_when_preflight_fails() -> Non
             threshold=None,
         )
 
-    assert events == ["open", "preflight", "close"]
+    assert events == ["preflight"]
     assert renderer.rendered_images == []
     assert provider.calls == []
 
@@ -294,7 +290,7 @@ def test_pdf_pipeline_checks_deadline_before_preprocessing() -> None:
             threshold=None,
         )
 
-    assert events == ["open", "preflight", "render:0", "close"]
+    assert events == ["preflight", "render:0"]
     assert provider.calls == []
     with pytest.raises(ValueError):
         renderer.rendered_images[0].getpixel((0, 0))

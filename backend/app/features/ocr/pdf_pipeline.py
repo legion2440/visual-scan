@@ -81,49 +81,55 @@ class PdfOcrPipeline:
         deadline = self._clock() + self._pdf_timeout_seconds
         pages: list[PdfPagePipelineResult] = []
 
-        with self._renderer.open_document(data, password, deadline=deadline) as document:
-            specs = document.preflight(
+        specs = self._renderer.preflight(
+            data,
+            password,
+            deadline=deadline,
+            max_pages=self._max_pages,
+            max_page_pixels=self._max_page_pixels,
+            max_total_pixels=self._max_total_pixels,
+        )
+        self._remaining(deadline)
+
+        for spec in specs:
+            rendered = self._renderer.render_page(
+                data,
+                password,
+                spec,
                 deadline=deadline,
-                max_pages=self._max_pages,
-                max_page_pixels=self._max_page_pixels,
-                max_total_pixels=self._max_total_pixels,
             )
-            self._remaining(deadline)
+            prepared = None
+            try:
+                self._remaining(deadline)
+                prepared = transform_image(rendered, preprocessing, threshold)
+                prepared.load()
+                self._remaining(deadline)
 
-            for spec in specs:
-                rendered = document.render_page(spec, deadline=deadline)
-                prepared = None
-                try:
-                    self._remaining(deadline)
-                    prepared = transform_image(rendered, preprocessing, threshold)
-                    prepared.load()
-                    self._remaining(deadline)
-
-                    timeout = min(
-                        float(self._ocr_timeout_seconds),
-                        self._remaining(deadline),
-                    )
-                    result = self._provider.recognize(
-                        prepared,
-                        language.value,
-                        timeout_seconds=timeout,
-                    )
-                    self._remaining(deadline)
-                finally:
-                    if prepared is not None:
-                        prepared.close()
-                    rendered.close()
-
-                pages.append(
-                    PdfPagePipelineResult(
-                        page=spec.index + 1,
-                        text=result.text,
-                        confidence=result.confidence,
-                        words=result.words,
-                        width=spec.width,
-                        height=spec.height,
-                    )
+                timeout = min(
+                    float(self._ocr_timeout_seconds),
+                    self._remaining(deadline),
                 )
+                result = self._provider.recognize(
+                    prepared,
+                    language.value,
+                    timeout_seconds=timeout,
+                )
+                self._remaining(deadline)
+            finally:
+                if prepared is not None:
+                    prepared.close()
+                rendered.close()
+
+            pages.append(
+                PdfPagePipelineResult(
+                    page=spec.index + 1,
+                    text=result.text,
+                    confidence=result.confidence,
+                    words=result.words,
+                    width=spec.width,
+                    height=spec.height,
+                )
+            )
 
         return PdfPipelineResult(
             text="\n\n".join(page.text for page in pages),

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import string
+import subprocess
 from collections import OrderedDict
 from dataclasses import dataclass
 from math import isfinite
 from threading import Lock
+from time import monotonic
 from typing import Any
 
 import pytesseract
+from packaging.version import InvalidVersion, parse
 from PIL import Image
 from pytesseract import Output, TesseractError, TesseractNotFoundError
 
@@ -20,11 +24,63 @@ from app.features.ocr.errors import (
 
 _COMMAND_LOCK = Lock()
 _configured_tesseract_command: str | None = None
+_VERSION_LOCK = Lock()
+_version_command: str | None = None
 _MISSING_LANGUAGE_MARKERS = (
     "error opening data file",
     "failed loading language",
     "could not initialize tesseract",
 )
+
+
+def _remaining(deadline: float, clock: Any) -> float:
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise OcrTimeoutError()
+    return remaining
+
+
+def _ensure_tesseract_version(deadline: float, clock: Any) -> None:
+    """Populate pytesseract's version cache within the current OCR budget."""
+    global _version_command
+
+    command = pytesseract.pytesseract.tesseract_cmd
+    if _version_command == command:
+        return
+
+    if not _VERSION_LOCK.acquire(timeout=_remaining(deadline, clock)):
+        raise OcrTimeoutError()
+
+    try:
+        if _version_command == command:
+            return
+        try:
+            output = subprocess.check_output(
+                [command, "--version"],
+                stderr=subprocess.STDOUT,
+                env=pytesseract.pytesseract.environ,
+                stdin=subprocess.DEVNULL,
+                timeout=_remaining(deadline, clock),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise OcrTimeoutError() from error
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise OcrEngineUnavailableError() from error
+
+        try:
+            raw_version = output.decode(pytesseract.pytesseract.DEFAULT_ENCODING)
+            version_text, *_ = raw_version.lstrip(string.printable[10:]).partition(" ")
+            version_text, *_ = version_text.partition("-")
+            version = parse(version_text)
+            if version < pytesseract.pytesseract.TESSERACT_MIN_VERSION:
+                raise InvalidVersion(version_text)
+        except (UnicodeError, InvalidVersion) as error:
+            raise OcrEngineUnavailableError() from error
+
+        pytesseract.pytesseract.get_tesseract_version._result = version
+        _version_command = command
+    finally:
+        _VERSION_LOCK.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +155,16 @@ def _build_result(data: dict[str, list[Any]]) -> ProviderResult:
 class TesseractProvider:
     """Run exactly one pytesseract recognition operation per image."""
 
-    def __init__(self, timeout_seconds: int, tesseract_command: str = "") -> None:
+    def __init__(
+        self,
+        timeout_seconds: int,
+        tesseract_command: str = "",
+        *,
+        clock: Any = monotonic,
+    ) -> None:
         configure_tesseract_command(tesseract_command)
         self._timeout_seconds = timeout_seconds
+        self._clock = clock
 
     def recognize(
         self,
@@ -114,13 +177,16 @@ class TesseractProvider:
         if effective_timeout <= 0:
             raise OcrTimeoutError()
 
+        deadline = self._clock() + effective_timeout
+        _ensure_tesseract_version(deadline, self._clock)
+
         try:
             data = pytesseract.image_to_data(
                 image,
                 lang=language,
                 config="--oem 1",
                 output_type=Output.DICT,
-                timeout=effective_timeout,
+                timeout=_remaining(deadline, self._clock),
             )
         except TesseractNotFoundError as error:
             raise OcrEngineUnavailableError() from error

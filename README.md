@@ -307,7 +307,8 @@ defaults are 50 MB, 20 pages, 25 million rendered pixels per page, 200 million
 rendered pixels across the document, 300 DPI, and a 180-second whole-document
 deadline. Page dimensions must be finite and positive. PDF preflight validates
 all page and total limits before the first OCR call; each rendered image must
-then match its preflight dimensions exactly.
+then match its preflight dimensions exactly. Both stages compute
+`scale = dpi / 72` once and use `ceil(points * scale)`.
 
 Visual Scan does not save uploaded originals or create application-managed
 temporary files. FastAPI's multipart parser and pytesseract may use system
@@ -454,16 +455,21 @@ between page results. Rendering uses a white background and includes PDF
 annotations. `init_forms()` is intentionally not called, so unflattened
 AcroForm and XFA field values may be absent from the rendered image.
 
-PDFium is not thread-safe. Every PDFium operation is serialized by one
-process-wide lock; Pillow preprocessing and Tesseract run after that lock is
-released. Waiting for the lock, rendering, preprocessing, and recognition all
-consume the whole-document deadline.
+PDFium is not thread-safe. Preflight opens and closes its native document
+inside one process-wide lock. Each page render separately reopens the
+document, detaches an RGB image, and closes all native resources inside one
+lock. Pillow preprocessing and Tesseract run after that lock is released.
+Every lock wait, the bounded first Tesseract version probe, rendering,
+preprocessing, and recognition consume the whole-document deadline.
+Non-interruptible in-process PDFium and Pillow calls are checked immediately
+before and after their boundaries rather than forcibly terminated mid-call.
 
 Each image request runs one `pytesseract.image_to_data()` recognition call.
 The API does not query installed languages before recognition and never falls
-back to another language. Tesseract itself may perform an internal cached
-version probe, so this contract does not promise exactly one native subprocess
-per OCR call.
+back to another language. Before the first recognition, the provider runs a
+bounded `tesseract --version` probe and primes pytesseract's version cache.
+Consequently, this contract promises one recognition call but not exactly one
+native subprocess on the first OCR request.
 
 Expected OCR failures use HTTP 400 for empty or corrupt content, 413 for byte,
 page, or pixel limits, 415 for unsupported or mismatched formats, 422 for

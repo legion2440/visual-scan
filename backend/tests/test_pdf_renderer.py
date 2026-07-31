@@ -50,24 +50,25 @@ def test_real_pdf_preflight_matches_fractional_and_rotated_render_sizes() -> Non
     )
     renderer = PdfiumRenderer(render_dpi=300, clock=lambda: 0.0)
 
-    with renderer.open_document(data, None, deadline=10) as document:
-        specs = document.preflight(
-            deadline=10,
-            max_pages=2,
-            max_page_pixels=1_000_000,
-            max_total_pixels=2_000_000,
-        )
-        images = [document.render_page(spec, deadline=10) for spec in specs]
+    specs = renderer.preflight(
+        data,
+        None,
+        deadline=10,
+        max_pages=2,
+        max_page_pixels=1_000_000,
+        max_total_pixels=2_000_000,
+    )
+    images = [renderer.render_page(data, None, spec, deadline=10) for spec in specs]
 
     try:
         assert [(spec.width, spec.height) for spec in specs] == [
             (
-                ceil(72.5 * 300 / 72),
-                ceil(144.25 * 300 / 72),
+                ceil(72.5 * renderer.scale),
+                ceil(144.25 * renderer.scale),
             ),
             (
-                ceil(144.25 * 300 / 72),
-                ceil(72.5 * 300 / 72),
+                ceil(144.25 * renderer.scale),
+                ceil(72.5 * renderer.scale),
             ),
         ]
         assert [image.size for image in images] == [(spec.width, spec.height) for spec in specs]
@@ -76,6 +77,27 @@ def test_real_pdf_preflight_matches_fractional_and_rotated_render_sizes() -> Non
     finally:
         for image in images:
             image.close()
+
+
+def test_real_letter_pdf_preflight_matches_pdfium_at_300_dpi() -> None:
+    data = make_pdf_bytes([(612, 792, 0)])
+    renderer = PdfiumRenderer(render_dpi=300, clock=lambda: 0.0)
+
+    specs = renderer.preflight(
+        data,
+        None,
+        deadline=10,
+        max_pages=1,
+        max_page_pixels=9_000_000,
+        max_total_pixels=9_000_000,
+    )
+    image = renderer.render_page(data, None, specs[0], deadline=10)
+
+    try:
+        assert (specs[0].width, specs[0].height) == (2550, 3301)
+        assert image.size == (2550, 3301)
+    finally:
+        image.close()
 
 
 class TrackingLock:
@@ -209,6 +231,9 @@ class FakePdfiumModule:
         if self.error is not None:
             raise self.error
         assert self.document is not None
+        self.document.closed = False
+        for page in self.document._pages:
+            page.closed = False
         return self.document
 
 
@@ -240,22 +265,31 @@ def build_fake_renderer(
     return renderer, actual_lock, module, document, page, events
 
 
-def test_pdfium_calls_resources_and_annotations_stay_under_lock() -> None:
+def test_pdfium_lifecycle_closes_each_document_inside_its_single_lock() -> None:
     renderer, lock, module, document, page, events = build_fake_renderer()
 
-    with renderer.open_document(b"pdf", "secret", deadline=10) as session:
-        specs = session.preflight(
-            deadline=10,
-            max_pages=1,
-            max_page_pixels=4,
-            max_total_pixels=4,
-        )
-        image = session.render_page(specs[0], deadline=10)
-        assert not lock.held
-        assert image.getpixel((0, 0)) == (10, 20, 30)
+    specs = renderer.preflight(
+        b"pdf",
+        "secret",
+        deadline=10,
+        max_pages=1,
+        max_page_pixels=4,
+        max_total_pixels=4,
+    )
+    image = renderer.render_page(
+        b"pdf",
+        "secret",
+        specs[0],
+        deadline=10,
+    )
+    assert not lock.held
+    assert image.getpixel((0, 0)) == (10, 20, 30)
 
     try:
-        assert module.calls == [{"data": b"pdf", "password": "secret"}]
+        assert module.calls == [
+            {"data": b"pdf", "password": "secret"},
+            {"data": b"pdf", "password": "secret"},
+        ]
         assert page.render_calls == [
             {
                 "scale": 1.0,
@@ -273,7 +307,8 @@ def test_pdfium_calls_resources_and_annotations_stay_under_lock() -> None:
             "bitmap.close",
             "page.close",
         ]
-        assert lock.release_calls == 4
+        assert lock.release_calls == 2
+        assert lock.acquire_calls == [10.0, 10.0]
     finally:
         image.close()
 
@@ -294,11 +329,10 @@ def test_invalid_page_dimensions_are_rejected_before_ceil(
 ) -> None:
     renderer, _, _, document, page, _ = build_fake_renderer(size_points=size_points)
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=10) as session,
-        pytest.raises(InvalidPdfError),
-    ):
-        session.preflight(
+    with pytest.raises(InvalidPdfError):
+        renderer.preflight(
+            b"pdf",
+            None,
             deadline=10,
             max_pages=1,
             max_page_pixels=4,
@@ -315,13 +349,14 @@ def test_page_pixel_limit_is_inclusive_and_checked_during_preflight() -> None:
         rendered_size=(2, 2),
     )
 
-    with renderer.open_document(b"pdf", None, deadline=10) as session:
-        specs = session.preflight(
-            deadline=10,
-            max_pages=1,
-            max_page_pixels=4,
-            max_total_pixels=4,
-        )
+    specs = renderer.preflight(
+        b"pdf",
+        None,
+        deadline=10,
+        max_pages=1,
+        max_page_pixels=4,
+        max_total_pixels=4,
+    )
 
     assert specs[0].pixels == 4
 
@@ -332,11 +367,10 @@ def test_page_pixel_limit_rejects_before_render() -> None:
         rendered_size=(2, 2),
     )
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=10) as session,
-        pytest.raises(PdfTooLargeError, match="page limit"),
-    ):
-        session.preflight(
+    with pytest.raises(PdfTooLargeError, match="page limit"):
+        renderer.preflight(
+            b"pdf",
+            None,
             deadline=10,
             max_pages=1,
             max_page_pixels=3,
@@ -361,11 +395,10 @@ def test_total_pixel_limit_rejects_individually_valid_pages() -> None:
         clock=lambda: 0.0,
     )
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=10) as session,
-        pytest.raises(PdfTooLargeError, match="total limit"),
-    ):
-        session.preflight(
+    with pytest.raises(PdfTooLargeError, match="total limit"):
+        renderer.preflight(
+            b"pdf",
+            None,
             deadline=10,
             max_pages=2,
             max_page_pixels=4,
@@ -390,11 +423,10 @@ def test_page_count_limit_rejects_before_page_access() -> None:
         clock=lambda: 0.0,
     )
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=10) as session,
-        pytest.raises(PdfTooLargeError, match="1-page"),
-    ):
-        session.preflight(
+    with pytest.raises(PdfTooLargeError, match="1-page"):
+        renderer.preflight(
+            b"pdf",
+            None,
             deadline=10,
             max_pages=1,
             max_page_pixels=1,
@@ -414,11 +446,15 @@ def test_zero_page_pdf_is_rejected_and_closed() -> None:
         clock=lambda: 0.0,
     )
 
-    with (
-        pytest.raises(InvalidPdfError),
-        renderer.open_document(b"pdf", None, deadline=10),
-    ):
-        raise AssertionError("zero-page PDF must not yield a session")
+    with pytest.raises(InvalidPdfError):
+        renderer.preflight(
+            b"pdf",
+            None,
+            deadline=10,
+            max_pages=1,
+            max_page_pixels=1,
+            max_total_pixels=1,
+        )
 
     assert document.closed
 
@@ -438,11 +474,15 @@ def test_pdfium_errors_are_classified_only_by_err_code(
 ) -> None:
     renderer, _, _, _, _, _ = build_fake_renderer(module_error=FakePdfiumError(message, err_code))
 
-    with (
-        pytest.raises(expected_error) as captured,
-        renderer.open_document(b"private bytes", None, deadline=10),
-    ):
-        raise AssertionError("failed open must not yield a session")
+    with pytest.raises(expected_error) as captured:
+        renderer.preflight(
+            b"private bytes",
+            None,
+            deadline=10,
+            max_pages=1,
+            max_page_pixels=1,
+            max_total_pixels=1,
+        )
 
     assert message not in str(captured.value)
 
@@ -451,38 +491,41 @@ def test_lock_timeout_prevents_document_open() -> None:
     lock = TrackingLock(outcomes=[False])
     renderer, _, module, _, _, _ = build_fake_renderer(lock=lock)
 
-    with (
-        pytest.raises(OcrTimeoutError),
-        renderer.open_document(b"pdf", None, deadline=2),
-    ):
-        raise AssertionError("timed out open must not yield a session")
+    with pytest.raises(OcrTimeoutError):
+        renderer.preflight(
+            b"pdf",
+            None,
+            deadline=2,
+            max_pages=1,
+            max_page_pixels=4,
+            max_total_pixels=4,
+        )
 
     assert lock.acquire_calls == [2.0]
     assert module.calls == []
 
 
 def test_lock_timeout_before_render_prevents_render_call() -> None:
-    lock = TrackingLock(outcomes=[True, True, False, True])
+    lock = TrackingLock(outcomes=[True, False])
     renderer, _, _, document, page, _ = build_fake_renderer(lock=lock)
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=10) as session,
-        pytest.raises(OcrTimeoutError),
-    ):
-        specs = session.preflight(
-            deadline=10,
-            max_pages=1,
-            max_page_pixels=4,
-            max_total_pixels=4,
-        )
-        session.render_page(specs[0], deadline=10)
+    specs = renderer.preflight(
+        b"pdf",
+        None,
+        deadline=10,
+        max_pages=1,
+        max_page_pixels=4,
+        max_total_pixels=4,
+    )
+    with pytest.raises(OcrTimeoutError):
+        renderer.render_page(b"pdf", None, specs[0], deadline=10)
 
     assert page.render_calls == []
     assert document.closed
 
 
 def test_deadline_expiry_during_preflight_stops_before_next_page() -> None:
-    clock_values = iter([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0])
+    clock_values = iter([0.0, 0.0, 0.0, 0.0, 10.0])
     lock = TrackingLock()
     events: list[str] = []
     pages = [
@@ -497,11 +540,10 @@ def test_deadline_expiry_during_preflight_stops_before_next_page() -> None:
         clock=lambda: next(clock_values),
     )
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=5) as session,
-        pytest.raises(OcrTimeoutError),
-    ):
-        session.preflight(
+    with pytest.raises(OcrTimeoutError):
+        renderer.preflight(
+            b"pdf",
+            None,
             deadline=5,
             max_pages=2,
             max_page_pixels=1,
@@ -518,17 +560,16 @@ def test_render_size_mismatch_is_a_safe_render_error() -> None:
         rendered_size=(3, 2),
     )
 
-    with (
-        renderer.open_document(b"pdf", None, deadline=10) as session,
-        pytest.raises(PdfRenderError) as captured,
-    ):
-        specs = session.preflight(
-            deadline=10,
-            max_pages=1,
-            max_page_pixels=4,
-            max_total_pixels=4,
-        )
-        session.render_page(specs[0], deadline=10)
+    specs = renderer.preflight(
+        b"pdf",
+        None,
+        deadline=10,
+        max_pages=1,
+        max_page_pixels=4,
+        max_total_pixels=4,
+    )
+    with pytest.raises(PdfRenderError) as captured:
+        renderer.render_page(b"pdf", None, specs[0], deadline=10)
 
     assert str(captured.value) == "PDF rendering failed unexpectedly."
     assert page.render_calls
@@ -537,11 +578,12 @@ def test_render_size_mismatch_is_a_safe_render_error() -> None:
 def test_rendered_image_is_independent_after_bitmap_and_page_close() -> None:
     renderer, _, _, _, _, _ = build_fake_renderer()
 
-    with renderer.open_document(b"pdf", None, deadline=10) as session:
-        image = session.render_page(
-            PdfPageSpec(index=0, width=2, height=2),
-            deadline=10,
-        )
+    image = renderer.render_page(
+        b"pdf",
+        None,
+        PdfPageSpec(index=0, width=2, height=2),
+        deadline=10,
+    )
 
     try:
         assert image.getpixel((0, 0)) == (10, 20, 30)

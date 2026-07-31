@@ -69,18 +69,25 @@ HTTP multipart upload
   orientation, and returns an in-memory Pillow image.
 - The PDF pipeline preflights every page before the first OCR call, then
   sequentially renders, preprocesses, and recognizes one page at a time.
-- PDF dimensions use `ceil(points * dpi / 72)` after finite, positive size
-  validation. Page and document pixel limits are final after preflight; a
-  render whose actual dimensions differ from preflight is an internal error.
-- PDFium document creation, page access, size reads, rendering, Pillow
-  detachment, and native resource cleanup all run under one process-wide lock.
-  Lock wait time consumes the whole-document deadline. Pillow preprocessing
-  and Tesseract run outside the PDFium lock.
+- PDF dimensions compute `scale = dpi / 72` once and then use
+  `ceil(points * scale)`, matching pypdfium2's render helper exactly after
+  finite, positive size validation. Page and document pixel limits are final
+  after preflight; a render whose actual dimensions differ from preflight is
+  an internal error.
+- Preflight opens, validates, and closes its native PDFium document inside one
+  process-wide lock. Each page render separately reopens, renders, detaches to
+  Pillow RGB, and closes every native resource inside one lock. No native
+  document remains open while Pillow preprocessing or Tesseract runs.
+- Every PDFium lock acquisition is bounded by the whole-document deadline.
+  PDFium and Pillow calls are checked before and after their non-interruptible
+  in-process boundaries rather than being forcibly terminated mid-call.
 - PDF rendering uses a white background and includes annotations.
   `init_forms()` is not called, so unflattened AcroForm or XFA values may be
   absent.
 - The provider owns each `pytesseract.image_to_data()` call and
-  normalizes Tesseract availability, version, and timeout failures.
+  normalizes Tesseract availability, version, and timeout failures. Its first
+  version probe, version-cache lock wait, and recognition subprocess share
+  one bounded per-call budget.
 
 Visual Scan does not persist uploaded originals or create application-managed
 temporary files. FastAPI's multipart parser and pytesseract may use system

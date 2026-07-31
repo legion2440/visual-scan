@@ -7,6 +7,12 @@ export class AuthContractError extends Error {
   }
 }
 
+export const EDITOR_PROVENANCE = Object.freeze({
+  MANUAL: 'manual',
+  BROWSER_OCR: 'browser_ocr',
+  SERVER_OCR: 'server_ocr',
+});
+
 export function codePointLength(value) {
   return Array.from(String(value)).length;
 }
@@ -94,6 +100,32 @@ export function normalizeAuthSession(value) {
 
 export function isAuthRevisionCurrent(authState, revision) {
   return authState.revision === revision;
+}
+
+export function authRequestSnapshot(authState) {
+  return Object.freeze({
+    revision: authState.revision,
+    userId: authState.status === 'authenticated' ? authState.user?.id || null : null,
+  });
+}
+
+export function isAuthRequestCurrent(authState, snapshot) {
+  return Boolean(
+    snapshot
+    && authState.status === 'authenticated'
+    && authState.revision === snapshot.revision
+    && authState.user?.id === snapshot.userId,
+  );
+}
+
+export function provenanceForOcrSource(source) {
+  return source === 'server'
+    ? EDITOR_PROVENANCE.SERVER_OCR
+    : EDITOR_PROVENANCE.BROWSER_OCR;
+}
+
+export function isServerDerivedEditor(provenance) {
+  return provenance === EDITOR_PROVENANCE.SERVER_OCR;
 }
 
 export function serverFeaturesAvailable(authState) {

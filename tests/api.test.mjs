@@ -257,3 +257,35 @@ test('a 401 clears CSRF before the next unsafe request', async (t) => {
   assert.equal(calls[0].headers['X-CSRF-Token'], 'expired-csrf');
   assert.equal(calls[1].headers, undefined);
 });
+
+test('a stale 401 cannot clear a newer CSRF generation', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  let finishOldRequest;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    api.clearCsrfToken();
+  });
+  api.setCsrfToken('old-csrf');
+  globalThis.fetch = async (_url, options) => {
+    calls.push(options);
+    if (calls.length === 1) {
+      return new Promise((resolve) => {
+        finishOldRequest = () => resolve(
+          jsonResponse({ detail: 'Authentication is required.' }, 401),
+        );
+      });
+    }
+    return jsonResponse({ deleted: 0 });
+  };
+
+  const stale = api.clearScans();
+  await new Promise((resolve) => setImmediate(resolve));
+  api.setCsrfToken('new-csrf');
+  finishOldRequest();
+  await assert.rejects(stale, { status: 401 });
+  await api.clearScans();
+
+  assert.equal(calls[0].headers['X-CSRF-Token'], 'old-csrf');
+  assert.equal(calls[1].headers['X-CSRF-Token'], 'new-csrf');
+});

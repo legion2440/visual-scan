@@ -178,6 +178,48 @@ class SQLiteAuthRepository:
         except (OSError, sqlite3.Error) as error:
             raise AuthStorageUnavailableError() from error
 
+    def rotate_login_session(
+        self,
+        *,
+        user_id: UUID,
+        token_hash: bytes,
+        csrf_hash: bytes,
+        created_at: datetime,
+        expires_at: datetime,
+        replaced_token_hash: bytes | None,
+        account_rate_limit_scope: str,
+        account_rate_limit_key: bytes,
+    ) -> None:
+        """Atomically rotate one session and clear its successful-login bucket."""
+        try:
+            with (
+                self._database.connection() as connection,
+                self._database.transaction(connection, immediate=True),
+            ):
+                if replaced_token_hash is not None:
+                    connection.execute(
+                        "DELETE FROM auth_sessions WHERE token_hash = ?",
+                        (replaced_token_hash,),
+                    )
+                connection.execute(
+                    "DELETE FROM auth_sessions WHERE expires_at <= ?",
+                    (_to_storage(created_at),),
+                )
+                self._insert_session(
+                    connection,
+                    token_hash=token_hash,
+                    user_id=user_id,
+                    csrf_hash=csrf_hash,
+                    created_at=created_at,
+                    expires_at=expires_at,
+                )
+                connection.execute(
+                    "DELETE FROM auth_rate_limits WHERE scope = ? AND key_hash = ?",
+                    (account_rate_limit_scope, account_rate_limit_key),
+                )
+        except (OSError, sqlite3.Error) as error:
+            raise AuthStorageUnavailableError() from error
+
     def get_session(self, token_hash: bytes) -> StoredSession | None:
         try:
             with self._database.connection() as connection, self._database.transaction(connection):
@@ -397,19 +439,6 @@ class SQLiteAuthRepository:
                 )
                 return 0
         except (OSError, sqlite3.Error, ValueError) as error:
-            raise AuthStorageUnavailableError() from error
-
-    def clear_rate_limit(self, scope: str, key_hash: bytes) -> None:
-        try:
-            with (
-                self._database.connection() as connection,
-                self._database.transaction(connection, immediate=True),
-            ):
-                connection.execute(
-                    "DELETE FROM auth_rate_limits WHERE scope = ? AND key_hash = ?",
-                    (scope, key_hash),
-                )
-        except (OSError, sqlite3.Error) as error:
             raise AuthStorageUnavailableError() from error
 
     @staticmethod

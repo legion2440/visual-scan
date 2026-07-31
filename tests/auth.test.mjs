@@ -3,12 +3,17 @@ import test from 'node:test';
 
 import {
   AuthContractError,
+  EDITOR_PROVENANCE,
   anonymousAfterUnauthorized,
+  authRequestSnapshot,
   codePointLength,
   identityChanged,
+  isAuthRequestCurrent,
   isAuthRevisionCurrent,
+  isServerDerivedEditor,
   normalizeAuthSession,
   normalizeUsername,
+  provenanceForOcrSource,
   serverFeaturesAvailable,
   validatePassword,
 } from '../frontend/utils/auth.js';
@@ -83,6 +88,10 @@ test('revision, identity, and 401 transitions are deterministic', () => {
   assert.equal(isAuthRevisionCurrent(auth, 4), true);
   assert.equal(identityChanged(auth.user, { id: 'one' }), false);
   assert.equal(identityChanged(auth.user, { id: 'two' }), true);
+  const snapshot = authRequestSnapshot(auth);
+  assert.equal(isAuthRequestCurrent(auth, snapshot), true);
+  assert.equal(isAuthRequestCurrent({ ...auth, revision: 5 }, snapshot), false);
+  assert.equal(isAuthRequestCurrent({ ...auth, user: { id: 'two' } }, snapshot), false);
   const anonymous = anonymousAfterUnauthorized(auth);
   assert.deepEqual(anonymous, {
     status: 'anonymous',
@@ -91,4 +100,15 @@ test('revision, identity, and 401 transitions are deterministic', () => {
     busy: false,
     revision: 5,
   });
+});
+
+test('editor provenance survives OCR metadata invalidation decisions', () => {
+  const server = provenanceForOcrSource('server');
+  const browser = provenanceForOcrSource('browser');
+
+  assert.equal(server, EDITOR_PROVENANCE.SERVER_OCR);
+  assert.equal(browser, EDITOR_PROVENANCE.BROWSER_OCR);
+  assert.equal(isServerDerivedEditor(server), true);
+  assert.equal(isServerDerivedEditor(browser), false);
+  assert.equal(isServerDerivedEditor(EDITOR_PROVENANCE.MANUAL), false);
 });

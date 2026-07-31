@@ -92,8 +92,6 @@ class AuthenticatedPrincipal:
     username: str
     created_at: datetime
     is_initial_user: bool
-    session_token_hash: bytes
-    csrf_hash: bytes
 
     def to_user(self) -> AuthUser:
         return AuthUser(
@@ -102,29 +100,3 @@ class AuthenticatedPrincipal:
             created_at=self.created_at,
             is_initial_user=self.is_initial_user,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class AuthOutcome:
-    """Internal successful auth result including raw browser-only tokens."""
-
-    principal: AuthenticatedPrincipal
-    session_token: str
-    csrf_token: str
-
-    def to_response(self) -> SessionResponse:
-        return SessionResponse(
-            authenticated=True,
-            user=self.principal.to_user(),
-            csrf_token=self.csrf_token,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SessionResolution:
-    """Result of resolving an optional cookie without exposing raw secrets."""
-
-    principal: AuthenticatedPrincipal | None
-    csrf_token: str | None = None
-    clear_cookie: bool = False
-    inactive: bool = False

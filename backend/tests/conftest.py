@@ -20,10 +20,7 @@ def test_settings(tmp_path: Path) -> Settings:
         app_version="9.9.9",
         environment="test",
         api_prefix="/api",
-        cors_origins=[
-            "http://localhost:5500",
-            "http://127.0.0.1:5500",
-        ],
+        cors_origins=["http://localhost:5500"],
         host="127.0.0.1",
         port=8000,
         tesseract_cmd="",

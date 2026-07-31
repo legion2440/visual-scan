@@ -9,16 +9,17 @@
 import { CONFIG } from '../config.js';
 
 let csrfToken = null;
+let csrfRevision = 0;
 
 function csrfExempt(path) {
   return path === '/api/auth/register' || path === '/api/auth/login';
 }
 
-function requestHeaders(path, method, body) {
+function requestHeaders(path, method, body, requestCsrfToken) {
   const headers = {};
   if (body != null && !(body instanceof FormData)) headers['Content-Type'] = 'application/json';
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !csrfExempt(path) && csrfToken) {
-    headers['X-CSRF-Token'] = csrfToken;
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !csrfExempt(path) && requestCsrfToken) {
+    headers['X-CSRF-Token'] = requestCsrfToken;
   }
   return Object.keys(headers).length ? headers : undefined;
 }
@@ -111,18 +112,23 @@ export async function request(path, {
 
   const isFormData = body instanceof FormData;
   const serializedBody = body == null || isFormData ? body : JSON.stringify(body);
+  const requestCsrfToken = csrfToken;
+  const requestCsrfRevision = csrfRevision;
 
   try {
     const response = await fetch(buildUrl(path, query), {
       method,
       credentials: 'include',
       signal: controller.signal,
-      headers: requestHeaders(path, method, body),
+      headers: requestHeaders(path, method, body, requestCsrfToken),
       body: serializedBody,
     });
     const payload = await readPayload(response);
     if (!response.ok) {
-      if (response.status === 401) csrfToken = null;
+      if (response.status === 401 && csrfRevision === requestCsrfRevision) {
+        csrfToken = null;
+        csrfRevision += 1;
+      }
       throw new ApiError(responseErrorMessage(payload, method, path, response.status), {
         status: response.status,
         kind: 'http',
@@ -174,9 +180,11 @@ function pdfForm(file, { language, preprocessing, threshold, password }) {
 export const api = Object.freeze({
   setCsrfToken: (value) => {
     csrfToken = typeof value === 'string' && value ? value : null;
+    csrfRevision += 1;
   },
   clearCsrfToken: () => {
     csrfToken = null;
+    csrfRevision += 1;
   },
   authSession: ({ signal } = {}) => request('/api/auth/session', {
     timeoutMs: CONFIG.archiveTimeoutMs,

@@ -17,7 +17,7 @@ from app.features.auth.errors import (
     OriginValidationError,
 )
 from app.features.auth.schemas import AuthenticatedPrincipal
-from app.features.auth.service import AuthService
+from app.features.auth.service import AuthenticatedSession, AuthService
 
 
 def get_auth_service(request: Request) -> AuthService:
@@ -71,15 +71,10 @@ def clear_session_cookie(response: Response, settings: Settings) -> None:
 
 def auth_http_exception(
     error: AuthError,
-    *,
-    settings: Settings | None = None,
-    clear_cookie: bool = False,
 ) -> HTTPException:
     headers: dict[str, str] = {}
     if isinstance(error, AuthRateLimitError):
         headers["Retry-After"] = str(error.retry_after)
-    if clear_cookie and settings is not None:
-        headers["Set-Cookie"] = session_cookie_header(settings, clear=True)
     return HTTPException(status_code=error.status_code, detail=str(error), headers=headers or None)
 
 
@@ -90,11 +85,11 @@ def require_allowed_origin(request: Request) -> None:
         raise auth_http_exception(OriginValidationError())
 
 
-async def require_authenticated_principal(
+async def _require_authenticated_session(
     request: Request,
     service: Annotated[AuthService, Depends(get_auth_service)],
-) -> AuthenticatedPrincipal:
-    """Resolve the HttpOnly session cookie or return a safe auth error."""
+) -> AuthenticatedSession:
+    """Resolve internal session material without exposing it to features."""
     settings = request.app.state.settings
     raw_token = request.cookies.get(settings.auth_cookie_name)
     try:
@@ -102,30 +97,31 @@ async def require_authenticated_principal(
     except AuthError as error:
         raise auth_http_exception(error) from error
     if resolution.inactive:
-        raise auth_http_exception(
-            InactiveUserError(),
-            settings=settings,
-            clear_cookie=True,
-        )
-    if resolution.principal is None:
-        raise auth_http_exception(
-            AuthenticationRequiredError(),
-            settings=settings,
-            clear_cookie=resolution.clear_cookie,
-        )
-    return resolution.principal
+        raise auth_http_exception(InactiveUserError())
+    if resolution.session is None:
+        # A generic protected response must not delete a newer same-name cookie
+        # that may have been issued while this request was in flight.
+        raise auth_http_exception(AuthenticationRequiredError())
+    return resolution.session
+
+
+async def require_authenticated_principal(
+    session: Annotated[AuthenticatedSession, Depends(_require_authenticated_session)],
+) -> AuthenticatedPrincipal:
+    """Expose only the minimal public identity to unrelated features."""
+    return session.principal
 
 
 async def require_csrf_principal(
     request: Request,
-    principal: Annotated[AuthenticatedPrincipal, Depends(require_authenticated_principal)],
+    session: Annotated[AuthenticatedSession, Depends(_require_authenticated_session)],
     service: Annotated[AuthService, Depends(get_auth_service)],
     csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
 ) -> AuthenticatedPrincipal:
     """Require exact Origin and constant-time CSRF validation for a mutation."""
     require_allowed_origin(request)
     try:
-        service.verify_csrf(principal, csrf_token)
+        service.verify_csrf(session, csrf_token)
     except CsrfValidationError as error:
         raise auth_http_exception(error) from error
-    return principal
+    return session.principal

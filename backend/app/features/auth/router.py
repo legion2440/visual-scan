@@ -100,13 +100,13 @@ async def current_session(
     except Exception as error:
         logger.error("Unexpected session lookup failure (%s)", type(error).__name__)
         raise HTTPException(status_code=500, detail=AuthError.default_message) from error
-    if resolution.principal is None:
+    if resolution.session is None:
         if resolution.clear_cookie or resolution.inactive:
             clear_session_cookie(response, request.app.state.settings)
         return SessionResponse.anonymous()
     return SessionResponse(
         authenticated=True,
-        user=resolution.principal.to_user(),
+        user=resolution.session.principal.to_user(),
         csrf_token=resolution.csrf_token,
     )
 
@@ -123,8 +123,8 @@ async def logout(
     raw_token = _current_cookie(request)
     try:
         resolution = await run_in_threadpool(service.resolve_session, raw_token)
-        if resolution.principal is not None:
-            service.verify_csrf(resolution.principal, csrf_token)
+        if resolution.session is not None:
+            service.verify_csrf(resolution.session, csrf_token)
         await run_in_threadpool(service.logout, raw_token)
     except CsrfValidationError as error:
         # A bad CSRF token must not revoke or clear a valid session.

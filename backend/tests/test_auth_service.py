@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 
 from app.features.auth.errors import AuthRateLimitError, InvalidCredentialsError
 from app.features.auth.repository import SQLiteAuthRepository
-from app.features.auth.schemas import CredentialsRequest
+from app.features.auth.schemas import AuthenticatedPrincipal, CredentialsRequest
 from app.features.auth.security import AuthSecurity
 from app.features.auth.service import AuthService
 from app.storage.database import SQLiteDatabase
@@ -120,24 +121,33 @@ def test_idle_absolute_expiry_and_touch_interval(tmp_path: Path) -> None:
     outcome = service.register(credentials(), remote_address="one", current_session_token=None)
 
     clock.value = START + timedelta(seconds=4)
-    assert service.resolve_session(outcome.session_token).principal is not None
+    assert service.resolve_session(outcome.session_token).session is not None
     with sqlite3.connect(database.database_path) as connection:
         unchanged = connection.execute("SELECT last_seen_at FROM auth_sessions").fetchone()[0]
     assert unchanged == "2026-07-31T10:30:00.000000Z"
 
     clock.value = START + timedelta(seconds=6)
-    assert service.resolve_session(outcome.session_token).principal is not None
+    assert service.resolve_session(outcome.session_token).session is not None
     with sqlite3.connect(database.database_path) as connection:
         touched = connection.execute("SELECT last_seen_at FROM auth_sessions").fetchone()[0]
     assert touched == "2026-07-31T10:30:06.000000Z"
 
     clock.value = START + timedelta(seconds=27)
     expired = service.resolve_session(outcome.session_token)
-    assert expired.principal is None and expired.clear_cookie is True
+    assert expired.session is None and expired.clear_cookie is True
 
     second = service.login(credentials(), remote_address="two", current_session_token=None)
     clock.value += timedelta(seconds=101)
-    assert service.resolve_session(second.session_token).principal is None
+    assert service.resolve_session(second.session_token).session is None
+
+
+def test_public_principal_contains_only_identity_fields() -> None:
+    assert [field.name for field in fields(AuthenticatedPrincipal)] == [
+        "user_id",
+        "username",
+        "created_at",
+        "is_initial_user",
+    ]
 
 
 def test_login_account_bucket_blocks_after_five_failures(tmp_path: Path) -> None:

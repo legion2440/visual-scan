@@ -34,14 +34,10 @@ async def test_openapi_contains_health_and_ai_analysis(client: AsyncClient) -> N
     assert "/api/ai/analyze" in paths
 
 
-@pytest.mark.parametrize(
-    "origin",
-    ["http://localhost:5500", "http://127.0.0.1:5500"],
-)
 async def test_allowed_cors_origin_receives_header(
     client: AsyncClient,
-    origin: str,
 ) -> None:
+    origin = "http://localhost:5500"
     response = await client.get(
         "/api/health",
         headers={"Origin": origin},
@@ -57,6 +53,13 @@ async def test_unlisted_cors_origin_is_not_allowed(client: AsyncClient) -> None:
     )
 
     assert "access-control-allow-origin" not in response.headers
+
+
+async def test_default_cors_does_not_advertise_cross_site_loopback_origin() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.cors_origins == ["http://localhost:5500"]
+    assert "http://127.0.0.1:5500" not in settings.cors_origins
 
 
 async def test_credentialed_cors_preflight_uses_explicit_methods_and_headers(

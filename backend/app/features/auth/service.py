@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -16,9 +17,8 @@ from app.features.auth.errors import (
 from app.features.auth.repository import SQLiteAuthRepository, StoredUser
 from app.features.auth.schemas import (
     AuthenticatedPrincipal,
-    AuthOutcome,
     CredentialsRequest,
-    SessionResolution,
+    SessionResponse,
 )
 from app.features.auth.security import AuthSecurity
 from app.storage.database import SQLiteDatabase
@@ -31,6 +31,41 @@ LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_BLOCK_SECONDS = 15 * 60
 REGISTER_LIMIT = 5
 REGISTER_WINDOW_SECONDS = 60 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedSession:
+    """Auth-internal session material paired with the public identity."""
+
+    principal: AuthenticatedPrincipal
+    token_hash: bytes
+    csrf_hash: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class AuthOutcome:
+    """Successful auth result including raw browser-only response tokens."""
+
+    principal: AuthenticatedPrincipal
+    session_token: str
+    csrf_token: str
+
+    def to_response(self) -> SessionResponse:
+        return SessionResponse(
+            authenticated=True,
+            user=self.principal.to_user(),
+            csrf_token=self.csrf_token,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResolution:
+    """Internal resolution state never imported by unrelated features."""
+
+    session: AuthenticatedSession | None
+    csrf_token: str | None = None
+    clear_cookie: bool = False
+    inactive: bool = False
 
 
 class AuthService:
@@ -86,7 +121,7 @@ class AuthService:
             expires_at=now + self._absolute_lifetime,
             replaced_token_hash=self._optional_token_hash(current_session_token),
         )
-        principal = self._principal(user, token_hash=token_hash, csrf_hash=csrf_hash)
+        principal = self._principal(user)
         return AuthOutcome(principal, session_token, csrf_token)
 
     def login(
@@ -135,50 +170,51 @@ class AuthService:
             self._repository.update_password_hash(user.id, updated_hash)
 
         session_token, csrf_token, token_hash, csrf_hash = self._new_session_credentials()
-        self._repository.create_session(
+        self._repository.rotate_login_session(
             user_id=user.id,
             token_hash=token_hash,
             csrf_hash=csrf_hash,
             created_at=now,
             expires_at=now + self._absolute_lifetime,
             replaced_token_hash=self._optional_token_hash(current_session_token),
+            account_rate_limit_scope=LOGIN_ACCOUNT_SCOPE,
+            account_rate_limit_key=account_key,
         )
-        self._repository.clear_rate_limit(LOGIN_ACCOUNT_SCOPE, account_key)
-        principal = self._principal(user, token_hash=token_hash, csrf_hash=csrf_hash)
+        principal = self._principal(user)
         return AuthOutcome(principal, session_token, csrf_token)
 
     def resolve_session(self, session_token: str | None) -> SessionResolution:
         if not session_token:
-            return SessionResolution(principal=None)
+            return SessionResolution(session=None)
         token_hash = self._security.token_digest(session_token)
         session = self._repository.get_session(token_hash)
         if session is None:
-            return SessionResolution(principal=None, clear_cookie=True)
+            return SessionResolution(session=None, clear_cookie=True)
 
         now = self._now()
         if session.expires_at <= now or session.last_seen_at + self._idle_lifetime <= now:
             self._repository.delete_session(token_hash)
-            return SessionResolution(principal=None, clear_cookie=True)
+            return SessionResolution(session=None, clear_cookie=True)
         if not session.user.is_active:
-            return SessionResolution(principal=None, clear_cookie=True, inactive=True)
+            return SessionResolution(session=None, clear_cookie=True, inactive=True)
         if session.last_seen_at + self._touch_interval <= now:
             self._repository.touch_session(token_hash, now)
 
         csrf_token = self._security.csrf_token(session_token)
         if not self._security.verify_digest(csrf_token, session.csrf_hash):
             self._repository.delete_session(token_hash)
-            return SessionResolution(principal=None, clear_cookie=True)
+            return SessionResolution(session=None, clear_cookie=True)
         return SessionResolution(
-            principal=self._principal(
-                session.user,
+            session=AuthenticatedSession(
+                principal=self._principal(session.user),
                 token_hash=token_hash,
                 csrf_hash=session.csrf_hash,
             ),
             csrf_token=csrf_token,
         )
 
-    def verify_csrf(self, principal: AuthenticatedPrincipal, csrf_token: str | None) -> None:
-        if not csrf_token or not self._security.verify_digest(csrf_token, principal.csrf_hash):
+    def verify_csrf(self, session: AuthenticatedSession, csrf_token: str | None) -> None:
+        if not csrf_token or not self._security.verify_digest(csrf_token, session.csrf_hash):
             raise CsrfValidationError()
 
     def logout(self, session_token: str | None) -> None:
@@ -219,19 +255,12 @@ class AuthService:
         return self._security.token_digest(token) if token else None
 
     @staticmethod
-    def _principal(
-        user: StoredUser,
-        *,
-        token_hash: bytes,
-        csrf_hash: bytes,
-    ) -> AuthenticatedPrincipal:
+    def _principal(user: StoredUser) -> AuthenticatedPrincipal:
         return AuthenticatedPrincipal(
             user_id=user.id,
             username=user.username,
             created_at=user.created_at,
             is_initial_user=user.is_initial_user,
-            session_token_hash=token_hash,
-            csrf_hash=csrf_hash,
         )
 
 

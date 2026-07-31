@@ -30,12 +30,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     environment: str = "development"
     api_prefix: str = "/api"
-    cors_origins: list[str] = Field(
-        default_factory=lambda: [
-            "http://localhost:5500",
-            "http://127.0.0.1:5500",
-        ]
-    )
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5500"])
     host: str = "127.0.0.1"
     port: int = 8000
     tesseract_cmd: str = ""

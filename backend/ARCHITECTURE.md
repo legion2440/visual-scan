@@ -50,8 +50,10 @@ as health reporting can consist of only a router and its schemas.
 - Cross-feature collaboration must use a documented public entry point or
   shared contract.
 - `auth/dependencies.py` and auth principal schemas are the public security
-  boundary used by feature routers. Other features do not import auth service,
-  repository, security, or error internals.
+  boundary used by feature routers. The principal contains user identity only;
+  session-token and CSRF digests remain private auth service/dependency state.
+  Other features do not import auth service, repository, security, outcomes,
+  session resolution, or error internals.
 - `app/storage` is shared infrastructure, not an HTTP feature. It owns SQLite
   lifecycle and schema migration; feature repositories own only their SQL.
 - Routers must not contain provider, persistence, or multi-step orchestration
@@ -73,6 +75,9 @@ HTTP cookie + Origin/CSRF
   random token only in an HttpOnly, SameSite=Lax cookie; SQLite stores a
   32-byte SHA-256 digest. Login and registration rotate only the session
   presented by that browser, while logout revokes only the current session.
+- Successful login rotates the presented session, creates the replacement,
+  and clears the account rate-limit bucket under one `BEGIN IMMEDIATE`. A
+  failure in any of those writes rolls back all of them.
 - A stable CSRF token is derived with a domain-separated HMAC from the raw
   session token, returned by the session endpoint, and held only in frontend
   memory. SQLite stores only its digest. This lets reload and multiple tabs
@@ -86,9 +91,22 @@ HTTP cookie + Origin/CSRF
 - Session absolute expiry, idle expiry, and bounded touch writes are enforced
   against UTC timestamps. Username/IP rate-limit keys use domain-separated
   HMAC-SHA-256; raw addresses and usernames are not stored in rate buckets.
+- Generic protected 401 responses never emit a session-cookie deletion header:
+  an old in-flight response must not delete a newer cookie with the same name
+  and path. The explicit session-inspection endpoint cleans invalid cookies,
+  and logout retains its exact revoke-and-delete contract.
 - The fixed SameSite=Lax topology requires frontend and backend to remain
-  same-site. Production HTTPS enables the Secure cookie setting. Trusted proxy
-  address processing and cross-site cookies are outside this version.
+  same-site. The default development pair is `localhost:5500` and
+  `localhost:8000`; `127.0.0.1:5500` is intentionally not advertised as an
+  allowed default. Production HTTPS enables the Secure cookie setting. Trusted
+  proxy address processing and cross-site cookies are outside this version.
+
+Frontend protected operations capture both auth revision and user ID. Identity
+changes cancel long-running save/export/legacy-claim and server-processing
+requests, while stale completions and 401 responses are ignored. The HTTP
+transport similarly versions its in-memory CSRF value. Editor provenance is
+independent of mutable OCR display metadata, so server-derived text is still
+removed after selectors invalidate the visible OCR snapshot.
 
 ## OCR request flow
 

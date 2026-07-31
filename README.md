@@ -267,7 +267,7 @@ settings cover:
 `VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
 
 ```dotenv
-VISUAL_SCAN_CORS_ORIGINS=["http://localhost:5500","http://127.0.0.1:5500"]
+VISUAL_SCAN_CORS_ORIGINS=["http://localhost:5500"]
 VISUAL_SCAN_TESSERACT_CMD=
 VISUAL_SCAN_OCR_TIMEOUT_SECONDS=45
 VISUAL_SCAN_MAX_IMAGE_BYTES=20971520
@@ -298,8 +298,8 @@ VISUAL_SCAN_AUTH_TOUCH_INTERVAL_SECONDS=300
 VISUAL_SCAN_AUTH_HMAC_SECRET=replace-with-at-least-32-random-bytes
 ```
 
-The default allowed frontend origins are `http://localhost:5500` and
-`http://127.0.0.1:5500`.
+The default allowed frontend origin is `http://localhost:5500`. The default
+backend URL is `http://localhost:8000`, so both sides remain on the same site.
 
 Origins must be canonical scheme/host/port values without paths, credentials,
 queries, fragments, or wildcards. Production environments must replace the
@@ -319,7 +319,8 @@ response contains a CSRF token held only in JavaScript memory; it is never
 written to localStorage, sessionStorage, a URL, or a JSON archive. Every
 authenticated mutation sends it in `X-CSRF-Token`. All requests use
 `credentials: include`, and every unsafe request must have an exact allowed
-Origin.
+Origin. Login rotates the presented session and clears its account rate-limit
+bucket in one SQLite transaction.
 
 SameSite=Lax assumes frontend and backend are same-site. The documented local
 topology is `http://localhost:5500` with `http://localhost:8000`; do not mix
@@ -331,7 +332,18 @@ Server image/PDF OCR, AI analysis, and every scans endpoint require sign-in.
 Browser OCR, image editing, camera capture, and export/deletion of old browser
 localStorage records remain available anonymously. Logout or a 401 clears
 account-derived archive/detail/AI/server-OCR state while preserving
-browser/manual editor data.
+browser/manual editor data. Protected requests are bound to the authentication
+revision and user ID that started them; identity changes cancel long-running
+save, export, OCR/AI, and legacy-claim work, and stale responses cannot mutate
+the new account state. The editor tracks server-OCR provenance separately from
+display metadata, so changing OCR selectors cannot make server-derived text
+survive an identity switch.
+
+Generic protected 401 responses do not delete the session cookie: an old
+in-flight response must not erase a newer same-name cookie. Explicit logout
+and `GET /api/auth/session` still perform their documented cookie cleanup. The
+public authentication principal imported by OCR, analysis, and scans contains
+user identity only; session and CSRF digests stay inside the auth feature.
 
 The exact SQLite v1 archive is migrated to a separate `legacy_scans` table.
 Nothing is assigned automatically. The first registered user sees an explicit
@@ -426,8 +438,9 @@ errors. Any HTTP response proves reachability. Network failures and timeouts
 mark the backend unavailable; superseded requests do not alter the indicator.
 The same transport owns the in-memory CSRF value, adds it only to unsafe
 authenticated requests, sends credentials for every request, and clears CSRF
-immediately on HTTP 401. Application auth/archive/editor state remains in
-`app.js`; the transport never stores it.
+on HTTP 401 only when the response belongs to the current CSRF generation.
+Application auth/archive/editor state remains in `app.js`; the transport never
+stores it.
 
 The environment-neutral OCR registry lives in `frontend/ocrProfiles.js`.
 Browser code and both Node.js setup scripts import it, so profile identifiers,
@@ -860,10 +873,12 @@ real AI server or API key. The test suite never requires the system Tesseract
 binary. Scans tests use only SQLite databases under pytest `tmp_path`, exercise
 the real application lifespan, and cover schema validation, WAL concurrency,
 transactions, Unicode search, deterministic pagination, and safe failures.
-Auth tests cover cookie attributes, Origin/CSRF enforcement, Argon2 hashing,
-dummy verification, token rotation, expiry/touch timing, HMAC rate limits,
-cross-user 404 isolation, and atomic one-time legacy claim. The dependency
-graph check also rejects undeclared cross-feature imports and stale generated
+Auth tests cover cookie attributes, stale protected 401 behavior,
+Origin/CSRF enforcement, Argon2 hashing, dummy verification, atomic login
+rotation/rate-bucket cleanup, expiry/touch timing, HMAC rate limits, cross-user
+404 isolation, and atomic one-time legacy claim. Frontend tests also cover
+auth/CSRF generation guards and persistent editor provenance. The dependency
+graph check rejects undeclared cross-feature imports and stale generated
 output.
 
 ## Structure

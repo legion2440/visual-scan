@@ -56,8 +56,8 @@
       ],
       "owns": [
         "users and password hashing",
-        "opaque sessions and CSRF",
-        "authentication dependencies",
+        "internal opaque session and CSRF lifecycle",
+        "minimal public authentication principal dependencies",
         "authentication rate limits"
       ],
       "depends_on": [

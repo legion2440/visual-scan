@@ -195,6 +195,18 @@ async def test_server_features_require_authentication(
     assert response.json() == {"detail": "Authentication is required."}
 
 
+async def test_protected_401_never_deletes_a_same_name_browser_cookie(
+    anonymous_client: AsyncClient,
+) -> None:
+    response = await anonymous_client.get(
+        "/api/scans",
+        headers={"Cookie": "visual_scan_session=revoked-session-token"},
+    )
+
+    assert response.status_code == 401
+    assert "set-cookie" not in response.headers
+
+
 async def test_mutation_requires_csrf_and_exact_origin(client: AsyncClient) -> None:
     without_csrf = await client.post(
         "/api/scans",

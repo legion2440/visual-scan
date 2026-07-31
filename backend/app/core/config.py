@@ -3,8 +3,9 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
-from urllib.parse import urlsplit
+from unicodedata import category
 
+import httpx
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -58,11 +59,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_ai_configuration(self) -> Self:
         """Normalize AI settings and reject incomplete enabled deployments."""
-        self.ai_base_url = self.ai_base_url.strip().rstrip("/")
+        raw_base_url = self.ai_base_url
         self.ai_model = self.ai_model.strip()
         self.ai_provider_name = self.ai_provider_name.strip()
 
         if not self.ai_enabled:
+            self.ai_base_url = raw_base_url.strip().rstrip("/")
             return self
         if not self.ai_provider_name:
             raise ValueError("AI provider name must not be empty when AI is enabled.")
@@ -70,7 +72,7 @@ class Settings(BaseSettings):
         missing = [
             name
             for name, value in (
-                ("AI_BASE_URL", self.ai_base_url),
+                ("AI_BASE_URL", raw_base_url),
                 ("AI_MODEL", self.ai_model),
             )
             if not value
@@ -80,22 +82,30 @@ class Settings(BaseSettings):
                 "AI is enabled but required settings are missing: " + ", ".join(missing)
             )
 
-        parsed_url = urlsplit(self.ai_base_url)
+        if (
+            "?" in raw_base_url
+            or "#" in raw_base_url
+            or any(character.isspace() or category(character) == "Cc" for character in raw_base_url)
+        ):
+            raise ValueError(
+                "AI_BASE_URL must not contain whitespace, control characters, "
+                "a query, or a fragment."
+            )
+
         try:
-            _ = parsed_url.port
-        except ValueError as error:
-            raise ValueError("AI_BASE_URL contains an invalid port.") from error
+            parsed_url = httpx.URL(raw_base_url.rstrip("/"))
+        except httpx.InvalidURL as error:
+            raise ValueError("AI_BASE_URL is not a valid HTTP(S) URL.") from error
         if (
             parsed_url.scheme not in {"http", "https"}
-            or not parsed_url.hostname
-            or parsed_url.query
-            or parsed_url.fragment
+            or not parsed_url.host
             or parsed_url.username
             or parsed_url.password
         ):
             raise ValueError(
                 "AI_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment."
             )
+        self.ai_base_url = str(parsed_url).rstrip("/")
         return self
 
 

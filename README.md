@@ -301,6 +301,8 @@ optional for local servers and is stored as a Pydantic `SecretStr`.
 `json_object` sends `response_format={"type":"json_object"}`;
 `prompt_only` supports servers that do not implement that parameter. Visual
 Scan never retries automatically or silently changes response mode.
+The base URL is canonicalized during settings validation and must not contain
+credentials, whitespace or control characters, a query, or a fragment.
 
 The provider receives the sanitized filename, OCR language, and OCR text. It
 does not receive the source image. Analysis results are returned to the

@@ -99,6 +99,9 @@ class ProviderAnalysisResult(BaseModel):
     @field_validator("tags")
     @classmethod
     def normalize_tags(cls, values: list[str]) -> list[str]:
+        if len(values) > 10:
+            raise ValueError("Analysis contains more than 10 tags.")
+
         normalized: list[str] = []
         seen: set[str] = set()
         for value in values:
@@ -108,8 +111,6 @@ class ProviderAnalysisResult(BaseModel):
             if tag not in seen:
                 seen.add(tag)
                 normalized.append(tag)
-        if len(normalized) > 10:
-            raise ValueError("Analysis contains more than 10 tags.")
         return normalized
 
     @field_validator("fields")

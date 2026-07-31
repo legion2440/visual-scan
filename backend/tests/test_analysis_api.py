@@ -199,6 +199,7 @@ async def test_input_limit_returns_413(
         {**VALID_RESULT, "classification": "billing document"},
         {**VALID_RESULT, "confidence": 1.5},
         {**VALID_RESULT, "fields": [{"label": 123, "value": "invalid"}]},
+        {**VALID_RESULT, "tags": ["LEGAL", " legal "] * 5 + ["LEGAL"]},
     ],
 )
 async def test_schema_invalid_provider_result_returns_502(

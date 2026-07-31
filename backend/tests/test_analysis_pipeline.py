@@ -158,6 +158,10 @@ async def test_tags_and_fields_are_normalized_without_synthesizing_fields() -> N
         {**VALID_RESULT, "summary": "x" * 1_201},
         {**VALID_RESULT, "tags": [""]},
         {**VALID_RESULT, "tags": [f"tag-{index}" for index in range(11)]},
+        {
+            **VALID_RESULT,
+            "tags": ["LEGAL" if index % 2 else " legal " for index in range(11)],
+        },
         {**VALID_RESULT, "fields": [{"label": "", "value": "value"}]},
         {**VALID_RESULT, "fields": [{"label": "Date", "value": ""}]},
         {**VALID_RESULT, "fields": [{"label": "Date", "value": "x", "extra": "no"}]},

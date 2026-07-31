@@ -169,7 +169,12 @@ async def test_disabled_ai_ignores_empty_provider_configuration() -> None:
         "file:///tmp/provider",
         "http://user:secret@provider.test/v1",
         "http://provider.test/v1?query=yes",
+        "http://provider.test/v1?",
+        "http://provider.test/v1#",
         "http://provider.test:invalid/v1",
+        "http://provider.test/v1\nhidden",
+        "http://provider.test/v1\rhidden",
+        "http://provider.test/v1\thidden",
     ],
 )
 async def test_enabled_ai_rejects_unsafe_or_invalid_base_url(base_url: str) -> None:
@@ -180,3 +185,14 @@ async def test_enabled_ai_rejects_unsafe_or_invalid_base_url(base_url: str) -> N
             ai_base_url=base_url,
             ai_model="document-model",
         )
+
+
+async def test_enabled_ai_canonicalizes_base_url() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_enabled=True,
+        ai_base_url="HTTP://Provider.Test/v1/",
+        ai_model="document-model",
+    )
+
+    assert settings.ai_base_url == "http://provider.test/v1"

@@ -39,3 +39,29 @@ class OcrResponse(BaseModel):
     height: int = Field(gt=0)
     format: Literal["JPEG", "PNG", "WEBP"]
     engine: Literal["tesseract"] = "tesseract"
+
+
+class PdfPageOcrResult(BaseModel):
+    """OCR result for one one-based PDF page."""
+
+    page: int = Field(ge=1)
+    text: str
+    confidence: float | None
+    words: int = Field(ge=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+
+
+class PdfOcrResponse(BaseModel):
+    """Result returned by POST /api/ocr/pdf/recognize."""
+
+    filename: str
+    text: str
+    page_count: int = Field(gt=0)
+    language: OcrLanguage
+    preprocessing: PreprocessingMode
+    threshold: int | None = Field(default=None, ge=0, le=255)
+    render_dpi: int = Field(ge=72, le=600)
+    pages: list[PdfPageOcrResult]
+    format: Literal["PDF"] = "PDF"
+    engine: Literal["tesseract"] = "tesseract"

@@ -103,15 +103,24 @@ class TesseractProvider:
         configure_tesseract_command(tesseract_command)
         self._timeout_seconds = timeout_seconds
 
-    def recognize(self, image: Image.Image, language: str) -> ProviderResult:
+    def recognize(
+        self,
+        image: Image.Image,
+        language: str,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResult:
         """Recognize an image with LSTM/OEM 1 and normalized failures."""
+        effective_timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
+        if effective_timeout <= 0:
+            raise OcrTimeoutError()
+
         try:
             data = pytesseract.image_to_data(
                 image,
                 lang=language,
                 config="--oem 1",
                 output_type=Output.DICT,
-                timeout=self._timeout_seconds,
+                timeout=effective_timeout,
             )
         except TesseractNotFoundError as error:
             raise OcrEngineUnavailableError() from error

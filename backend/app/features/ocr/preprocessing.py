@@ -46,11 +46,12 @@ def _validate_pixel_count(width: int, height: int, max_pixels: int) -> None:
         raise ImageTooLargeError(f"The uploaded image exceeds the {max_pixels}-pixel limit.")
 
 
-def _convert_image(
+def transform_image(
     image: Image.Image,
     mode: PreprocessingMode,
     threshold: int | None,
 ) -> Image.Image:
+    """Return an independent image transformed for Tesseract."""
     if mode is PreprocessingMode.NONE:
         return image.convert("RGB")
     if mode is PreprocessingMode.GRAYSCALE:
@@ -99,7 +100,7 @@ def preprocess_image(
                 source.load()
                 oriented = ImageOps.exif_transpose(source)
                 try:
-                    output = _convert_image(oriented, mode, threshold)
+                    output = transform_image(oriented, mode, threshold)
                     output.load()
                 finally:
                     if oriented is not source:

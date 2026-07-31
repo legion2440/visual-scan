@@ -27,12 +27,15 @@
       "implementation": [
         "backend/app/features/ocr/service.py",
         "backend/app/features/ocr/pipeline.py",
+        "backend/app/features/ocr/pdf_pipeline.py",
+        "backend/app/features/ocr/pdf_renderer.py",
         "backend/app/features/ocr/preprocessing.py",
         "backend/app/features/ocr/provider.py",
         "backend/app/features/ocr/errors.py"
       ],
       "owns": [
         "server-side image validation",
+        "server-side PDF validation and rendering",
         "server-side preprocessing",
         "Tesseract OCR"
       ],
@@ -42,6 +45,9 @@
       "tests": [
         "backend/tests/test_ocr_api.py",
         "backend/tests/test_ocr_pipeline.py",
+        "backend/tests/test_pdf_ocr_api.py",
+        "backend/tests/test_pdf_ocr_pipeline.py",
+        "backend/tests/test_pdf_renderer.py",
         "backend/tests/test_tesseract_provider.py"
       ]
     }

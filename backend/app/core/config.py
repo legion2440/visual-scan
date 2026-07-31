@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     ocr_timeout_seconds: int = Field(default=45, gt=0)
     max_image_bytes: int = Field(default=20_971_520, gt=0)
     max_image_pixels: int = Field(default=25_000_000, gt=0)
+    max_pdf_bytes: int = Field(default=52_428_800, gt=0)
+    max_pdf_pages: int = Field(default=20, gt=0)
+    max_pdf_page_pixels: int = Field(default=25_000_000, gt=0)
+    max_pdf_total_pixels: int = Field(default=200_000_000, gt=0)
+    pdf_render_dpi: int = Field(default=300, ge=72, le=600)
+    pdf_timeout_seconds: int = Field(default=180, gt=0)
 
 
 @lru_cache(maxsize=1)

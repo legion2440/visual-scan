@@ -29,6 +29,12 @@ def test_settings() -> Settings:
         ocr_timeout_seconds=45,
         max_image_bytes=20_971_520,
         max_image_pixels=25_000_000,
+        max_pdf_bytes=52_428_800,
+        max_pdf_pages=20,
+        max_pdf_page_pixels=25_000_000,
+        max_pdf_total_pixels=200_000_000,
+        pdf_render_dpi=300,
+        pdf_timeout_seconds=180,
     )
 
 

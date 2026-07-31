@@ -15,7 +15,12 @@ from app.features.ocr.schemas import OcrLanguage, PreprocessingMode
 class OcrProvider(Protocol):
     """Provider behavior required by the OCR pipeline."""
 
-    def recognize(self, image: Image.Image, language: str) -> ProviderResult:
+    def recognize(
+        self,
+        image: Image.Image,
+        language: str,
+        timeout_seconds: float | None = None,
+    ) -> ProviderResult:
         """Recognize text in one prepared image."""
 
 

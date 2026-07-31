@@ -6,8 +6,8 @@ document image or camera capture, lets the user prepare the page on a
 `<canvas>`, and extracts editable text with Tesseract.js in the browser.
 
 The backend reports health and provides independent server-side OCR with
-in-memory Pillow preprocessing and the system Tesseract executable. AI
-analysis, database storage, authentication, Docker, and PDF OCR are not
+in-memory Pillow preprocessing, PDFium rendering, and the system Tesseract
+executable. AI analysis, database storage, authentication, and Docker are not
 implemented yet.
 
 ## Features
@@ -23,6 +23,7 @@ implemented yet.
 - Optional AI analysis request to a configured backend.
 - FastAPI application factory with CORS and `GET /api/health`.
 - Independent server-side Tesseract OCR for JPEG, PNG, and WebP uploads.
+- Sequential server-side PDF OCR with page-level text and metadata.
 - Server preprocessing modes: none, grayscale, and binary threshold.
 - Local results archive with sorting, search, classification filtering,
   detail view, deletion, and JSON export.
@@ -38,13 +39,14 @@ automatically.
 | | Browser OCR | Server OCR |
 | --- | --- | --- |
 | Engine | Tesseract.js worker | System Tesseract through pytesseract |
-| Input | Current Canvas image | Multipart JPEG, PNG, or WebP upload |
+| Input | Current Canvas image | Multipart JPEG, PNG, WebP, or PDF upload |
 | Preprocessing | Interactive Canvas controls | Requested none, grayscale, or threshold mode |
 | Models | Local frontend `traineddata` profiles | Languages installed with system Tesseract |
 | Backend required | No | Yes |
 
 The existing frontend continues to use browser OCR and is not yet wired to the
-server OCR endpoint. The two paths are intentionally independent in this step.
+server OCR endpoints. The two paths are intentionally independent in this
+step.
 
 ## OCR model profiles
 
@@ -232,10 +234,12 @@ settings cover:
 - environment name;
 - API prefix;
 - CORS origins;
-- documented host and port.
+- documented host and port;
 - optional Tesseract executable path;
-- OCR timeout;
-- upload byte and decoded pixel limits.
+- per-call image OCR timeout;
+- image upload byte and decoded pixel limits;
+- PDF upload byte, page, per-page pixel, and total pixel limits;
+- PDF render DPI and whole-document timeout.
 
 `VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
 
@@ -245,6 +249,12 @@ VISUAL_SCAN_TESSERACT_CMD=
 VISUAL_SCAN_OCR_TIMEOUT_SECONDS=45
 VISUAL_SCAN_MAX_IMAGE_BYTES=20971520
 VISUAL_SCAN_MAX_IMAGE_PIXELS=25000000
+VISUAL_SCAN_MAX_PDF_BYTES=52428800
+VISUAL_SCAN_MAX_PDF_PAGES=20
+VISUAL_SCAN_MAX_PDF_PAGE_PIXELS=25000000
+VISUAL_SCAN_MAX_PDF_TOTAL_PIXELS=200000000
+VISUAL_SCAN_PDF_RENDER_DPI=300
+VISUAL_SCAN_PDF_TIMEOUT_SECONDS=180
 ```
 
 The default allowed frontend origins are `http://localhost:5500` and
@@ -270,7 +280,7 @@ between runtime and setup.
 Static OCR assets are intentionally handled by `frontend/utils/ocr.js`:
 `manifest.json` and local traineddata are not backend API requests.
 
-## Image limits and errors
+## Input limits and errors
 
 The frontend accepts:
 
@@ -291,6 +301,13 @@ The server OCR endpoint applies its own configurable byte and pixel limits. It
 also rejects an empty or corrupt upload, an unsupported MIME type, and any
 mismatch between the declared MIME type and the decoded image format. Pillow
 decompression-bomb warnings and errors are returned as HTTP 413.
+
+The PDF endpoint accepts only a normalized `application/pdf` MIME type. Its
+defaults are 50 MB, 20 pages, 25 million rendered pixels per page, 200 million
+rendered pixels across the document, 300 DPI, and a 180-second whole-document
+deadline. Page dimensions must be finite and positive. PDF preflight validates
+all page and total limits before the first OCR call; each rendered image must
+then match its preflight dimensions exactly.
 
 Visual Scan does not save uploaded originals or create application-managed
 temporary files. FastAPI's multipart parser and pytesseract may use system
@@ -372,16 +389,87 @@ Example response:
 }
 ```
 
-The endpoint runs one `pytesseract.image_to_data()` recognition call per
-image. It does not query installed languages before recognition and never
-falls back to another language. Tesseract itself may perform an internal
-cached version probe, so this contract does not promise exactly one native
-subprocess.
+Server-side PDF OCR:
 
-Expected OCR failures use HTTP 400 for empty or corrupt content, 413 for byte
-or pixel limits, 415 for unsupported or mismatched formats, 422 for invalid
-parameters, 503 for a missing Tesseract binary or language data, and 504 for a
-Tesseract timeout. Unexpected errors return a generic 500 response without
+```http
+POST /api/ocr/pdf/recognize
+Content-Type: multipart/form-data
+```
+
+Multipart fields:
+
+- `file` - content declared as `application/pdf`;
+- `language` - the same values as image OCR; default `eng`;
+- `preprocessing` - `none`, `grayscale`, or `threshold`; default `none`;
+- `threshold` - the same conditional value and default as image OCR;
+- `password` - optional PDF password.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/ocr/pdf/recognize \
+  -F "file=@document.pdf;type=application/pdf" \
+  -F "language=eng+rus" \
+  -F "preprocessing=grayscale"
+```
+
+Example response:
+
+```json
+{
+  "filename": "document.pdf",
+  "text": "First page\n\nSecond page",
+  "page_count": 2,
+  "language": "eng+rus",
+  "preprocessing": "grayscale",
+  "threshold": null,
+  "render_dpi": 300,
+  "pages": [
+    {
+      "page": 1,
+      "text": "First page",
+      "confidence": 91.25,
+      "words": 2,
+      "width": 2480,
+      "height": 3508
+    },
+    {
+      "page": 2,
+      "text": "Second page",
+      "confidence": null,
+      "words": 2,
+      "width": 3508,
+      "height": 2480
+    }
+  ],
+  "format": "PDF",
+  "engine": "tesseract"
+}
+```
+
+PDF pages are preflighted and processed in one-based page order. The endpoint
+runs one `pytesseract.image_to_data()` call per page, preserves successful
+blank pages with empty text, and joins document text with one blank line
+between page results. Rendering uses a white background and includes PDF
+annotations. `init_forms()` is intentionally not called, so unflattened
+AcroForm and XFA field values may be absent from the rendered image.
+
+PDFium is not thread-safe. Every PDFium operation is serialized by one
+process-wide lock; Pillow preprocessing and Tesseract run after that lock is
+released. Waiting for the lock, rendering, preprocessing, and recognition all
+consume the whole-document deadline.
+
+Each image request runs one `pytesseract.image_to_data()` recognition call.
+The API does not query installed languages before recognition and never falls
+back to another language. Tesseract itself may perform an internal cached
+version probe, so this contract does not promise exactly one native subprocess
+per OCR call.
+
+Expected OCR failures use HTTP 400 for empty or corrupt content, 413 for byte,
+page, or pixel limits, 415 for unsupported or mismatched formats, 422 for
+invalid parameters or unsupported PDF security, 503 for a missing Tesseract
+binary or language data, and 504 for a processing deadline. Unexpected
+internal render or provider failures return a generic 500 response without
 local paths or tracebacks.
 
 `POST /api/ai/analyze` is intentionally absent. Until the analysis feature is
@@ -404,8 +492,9 @@ npm test
 The module-map tests reject duplicate JSON keys, absolute or non-POSIX paths,
 parent traversal, paths that resolve outside the repository, and references to
 missing files. OCR API tests replace the service dependency, pipeline tests
-use in-memory Pillow images and a fake provider, and provider tests mock
-`pytesseract.image_to_data()`. The test suite never requires the system
+use in-memory Pillow images and fake providers, PDF renderer tests combine
+instrumented PDFium doubles with generated in-memory PDFs, and provider tests
+mock `pytesseract.image_to_data()`. The test suite never requires the system
 Tesseract binary.
 
 ## Structure
@@ -428,6 +517,8 @@ visual-scan/
 │   │   │       ├── schemas.py
 │   │   │       ├── service.py
 │   │   │       ├── pipeline.py
+│   │   │       ├── pdf_pipeline.py
+│   │   │       ├── pdf_renderer.py
 │   │   │       ├── preprocessing.py
 │   │   │       ├── provider.py
 │   │   │       └── errors.py
@@ -439,6 +530,9 @@ visual-scan/
 │   │   ├── test_module_map.py
 │   │   ├── test_ocr_api.py
 │   │   ├── test_ocr_pipeline.py
+│   │   ├── test_pdf_ocr_api.py
+│   │   ├── test_pdf_ocr_pipeline.py
+│   │   ├── test_pdf_renderer.py
 │   │   └── test_tesseract_provider.py
 │   ├── .env.example
 │   ├── ARCHITECTURE.md
@@ -479,8 +573,8 @@ visual-scan/
 - `backend/app/api/router.py` composes public feature routers.
 - `backend/app/core/config.py` owns environment-backed settings.
 - `backend/app/features/health` owns the health contract and endpoint.
-- `backend/app/features/ocr` owns server-side image validation, preprocessing,
-  and Tesseract recognition.
+- `backend/app/features/ocr` owns server-side image and PDF validation,
+  serialized PDFium rendering, preprocessing, and Tesseract recognition.
 - `backend/module-map.json` is the backend navigation and ownership index.
 - `app.js` connects the interface, state, and user actions.
 - `config.js` contains browser/runtime URLs and safety limits.

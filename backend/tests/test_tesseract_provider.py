@@ -53,6 +53,42 @@ def test_provider_calls_image_to_data_once_and_aggregates_result(
     assert result.confidence == 80.0
 
 
+def test_provider_uses_per_call_timeout_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def image_to_data(*args: Any, **kwargs: Any) -> dict[str, list[Any]]:
+        calls.append(kwargs)
+        return sample_tesseract_data()
+
+    monkeypatch.setattr(provider_module.pytesseract, "image_to_data", image_to_data)
+    provider = TesseractProvider(timeout_seconds=45)
+
+    with Image.new("RGB", (1, 1)) as image:
+        provider.recognize(image, "eng", timeout_seconds=2.5)
+
+    assert calls[0]["timeout"] == 2.5
+
+
+def test_provider_rejects_exhausted_timeout_before_tesseract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def unexpected_call(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(provider_module.pytesseract, "image_to_data", unexpected_call)
+    provider = TesseractProvider(timeout_seconds=45)
+
+    with Image.new("RGB", (1, 1)) as image, pytest.raises(OcrTimeoutError):
+        provider.recognize(image, "eng", timeout_seconds=0)
+
+    assert calls == 0
+
+
 def test_confidence_is_none_when_no_nonnegative_word_confidence_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

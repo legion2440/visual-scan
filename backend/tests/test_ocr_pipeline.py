@@ -277,9 +277,21 @@ class StubPipeline:
         )
 
 
+class StubPdfPipeline:
+    """Reject accidental PDF calls from image-only service tests."""
+
+    def recognize(self, **kwargs: Any) -> None:
+        raise AssertionError(f"Unexpected PDF OCR call: {kwargs}")
+
+
 def test_service_defaults_threshold_and_sanitizes_both_path_styles() -> None:
     pipeline = StubPipeline()
-    service = OcrService(pipeline, max_image_bytes=100)
+    service = OcrService(
+        pipeline,
+        StubPdfPipeline(),
+        max_image_bytes=100,
+        max_pdf_bytes=100,
+    )
 
     result = service.recognize(
         filename=r"C:\private/uploads/scan.png",
@@ -308,7 +320,12 @@ def test_service_rejects_invalid_threshold_combinations(
     preprocessing: PreprocessingMode,
     threshold: int,
 ) -> None:
-    service = OcrService(StubPipeline(), max_image_bytes=100)
+    service = OcrService(
+        StubPipeline(),
+        StubPdfPipeline(),
+        max_image_bytes=100,
+        max_pdf_bytes=100,
+    )
 
     with pytest.raises(InvalidOcrParametersError):
         service.recognize(
@@ -323,7 +340,12 @@ def test_service_rejects_invalid_threshold_combinations(
 
 def test_service_rechecks_byte_and_empty_limits() -> None:
     pipeline = StubPipeline()
-    service = OcrService(pipeline, max_image_bytes=4)
+    service = OcrService(
+        pipeline,
+        StubPdfPipeline(),
+        max_image_bytes=4,
+        max_pdf_bytes=100,
+    )
 
     with pytest.raises(EmptyImageError):
         service.recognize(

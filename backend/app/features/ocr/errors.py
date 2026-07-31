@@ -54,7 +54,7 @@ class OcrEngineUnavailableError(OcrError):
 
 
 class OcrTimeoutError(OcrError):
-    """Raised when Tesseract exceeds its configured execution timeout."""
+    """Raised when OCR exceeds a configured call or document deadline."""
 
     status_code = 504
     default_message = "OCR processing timed out."
@@ -62,3 +62,51 @@ class OcrTimeoutError(OcrError):
 
 class OcrProcessingError(OcrError):
     """Raised for an unexpected provider failure with a safe response."""
+
+
+class EmptyPdfError(OcrError):
+    """Raised when the uploaded PDF contains no bytes."""
+
+    status_code = 400
+    default_message = "The uploaded PDF is empty."
+
+
+class InvalidPdfError(OcrError):
+    """Raised when PDFium cannot decode a usable PDF document."""
+
+    status_code = 400
+    default_message = "The uploaded file is not a valid PDF."
+
+
+class PdfTooLargeError(OcrError):
+    """Raised when a PDF exceeds a configured byte, page, or pixel limit."""
+
+    status_code = 413
+    default_message = "The uploaded PDF exceeds the configured size limit."
+
+
+class UnsupportedPdfFormatError(OcrError):
+    """Raised when the upload does not declare the PDF media type."""
+
+    status_code = 415
+    default_message = "Only application/pdf uploads are supported."
+
+
+class InvalidPdfPasswordError(OcrError):
+    """Raised when an encrypted PDF needs another password."""
+
+    status_code = 422
+    default_message = "The PDF password is required or incorrect."
+
+
+class UnsupportedPdfSecurityError(OcrError):
+    """Raised when PDFium cannot open the document's security scheme."""
+
+    status_code = 422
+    default_message = "The PDF security scheme is not supported."
+
+
+class PdfRenderError(OcrError):
+    """Raised when a PDF page cannot be rendered safely."""
+
+    default_message = "PDF rendering failed unexpectedly."

@@ -13,12 +13,21 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import Settings
 from app.features.ocr.errors import (
     EmptyImageError,
+    EmptyPdfError,
     ImageTooLargeError,
     OcrError,
+    PdfTooLargeError,
 )
+from app.features.ocr.pdf_pipeline import PdfOcrPipeline
+from app.features.ocr.pdf_renderer import PdfiumRenderer
 from app.features.ocr.pipeline import OcrPipeline
 from app.features.ocr.provider import TesseractProvider
-from app.features.ocr.schemas import OcrLanguage, OcrResponse, PreprocessingMode
+from app.features.ocr.schemas import (
+    OcrLanguage,
+    OcrResponse,
+    PdfOcrResponse,
+    PreprocessingMode,
+)
 from app.features.ocr.service import OcrService
 
 logger = logging.getLogger(__name__)
@@ -33,13 +42,24 @@ def _build_ocr_service(settings: Settings) -> OcrService:
         timeout_seconds=settings.ocr_timeout_seconds,
         tesseract_command=settings.tesseract_cmd,
     )
-    pipeline = OcrPipeline(
+    image_pipeline = OcrPipeline(
         provider=provider,
         max_image_pixels=settings.max_image_pixels,
     )
+    pdf_pipeline = PdfOcrPipeline(
+        renderer=PdfiumRenderer(render_dpi=settings.pdf_render_dpi),
+        provider=provider,
+        max_pages=settings.max_pdf_pages,
+        max_page_pixels=settings.max_pdf_page_pixels,
+        max_total_pixels=settings.max_pdf_total_pixels,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        pdf_timeout_seconds=settings.pdf_timeout_seconds,
+    )
     return OcrService(
-        pipeline=pipeline,
+        image_pipeline=image_pipeline,
+        pdf_pipeline=pdf_pipeline,
         max_image_bytes=settings.max_image_bytes,
+        max_pdf_bytes=settings.max_pdf_bytes,
     )
 
 
@@ -102,6 +122,48 @@ async def recognize_image(
         ) from error
     except Exception as error:
         logger.exception("Unexpected OCR request failure")
+        raise HTTPException(
+            status_code=500,
+            detail=OcrError.default_message,
+        ) from error
+
+
+@router.post("/pdf/recognize", response_model=PdfOcrResponse)
+async def recognize_pdf(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    service: Annotated[OcrService, Depends(get_ocr_service)],
+    language: Annotated[OcrLanguage, Form()] = OcrLanguage.ENGLISH,
+    preprocessing: Annotated[PreprocessingMode, Form()] = PreprocessingMode.NONE,
+    threshold: Annotated[int | None, Form(ge=0, le=255)] = None,
+    password: Annotated[str | None, Form()] = None,
+) -> PdfOcrResponse:
+    """Recognize a multipart PDF without persisting the original."""
+    max_bytes = request.app.state.settings.max_pdf_bytes
+
+    try:
+        data = await _read_upload(file, max_bytes)
+        if not data:
+            raise EmptyPdfError()
+        if len(data) > max_bytes:
+            raise PdfTooLargeError(f"The uploaded PDF exceeds the {max_bytes}-byte limit.")
+        return await run_in_threadpool(
+            service.recognize_pdf,
+            filename=file.filename,
+            data=data,
+            content_type=file.content_type,
+            language=language,
+            preprocessing=preprocessing,
+            threshold=threshold,
+            password=password,
+        )
+    except OcrError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=str(error),
+        ) from error
+    except Exception as error:
+        logger.exception("Unexpected PDF OCR request failure")
         raise HTTPException(
             status_code=500,
             detail=OcrError.default_message,

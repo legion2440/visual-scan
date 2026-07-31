@@ -52,22 +52,34 @@ The OCR feature uses every currently defined behavior layer:
 HTTP multipart upload
   → OCR router
   → OCR service
-  → OCR pipeline
-  → in-memory preprocessing
-  → Tesseract provider
+    ├→ image pipeline → in-memory image validation/preprocessing → Tesseract provider
+    └→ PDF pipeline → serialized PDFium preflight/rendering → preprocessing
+       └→ Tesseract provider
 ```
 
 - The router reads at most the configured byte limit plus one byte, maps
   feature errors to HTTP responses, and moves synchronous OCR work to
   Starlette's thread pool.
 - The service is the public feature entry point and owns request-level
-  invariants such as filename normalization and conditional threshold
-  validation.
-- The pipeline coordinates one preprocessing pass and one provider call.
-- Preprocessing validates the declared MIME type against the decoded image,
+  invariants such as filename normalization, exact PDF MIME validation, and
+  conditional threshold validation.
+- The image pipeline coordinates one preprocessing pass and one provider call.
+- Image preprocessing validates the declared MIME type against the decoded image,
   checks pixel limits before full decoding, verifies the image, applies EXIF
   orientation, and returns an in-memory Pillow image.
-- The provider owns the single `pytesseract.image_to_data()` call and
+- The PDF pipeline preflights every page before the first OCR call, then
+  sequentially renders, preprocesses, and recognizes one page at a time.
+- PDF dimensions use `ceil(points * dpi / 72)` after finite, positive size
+  validation. Page and document pixel limits are final after preflight; a
+  render whose actual dimensions differ from preflight is an internal error.
+- PDFium document creation, page access, size reads, rendering, Pillow
+  detachment, and native resource cleanup all run under one process-wide lock.
+  Lock wait time consumes the whole-document deadline. Pillow preprocessing
+  and Tesseract run outside the PDFium lock.
+- PDF rendering uses a white background and includes annotations.
+  `init_forms()` is not called, so unflattened AcroForm or XFA values may be
+  absent.
+- The provider owns each `pytesseract.image_to_data()` call and
   normalizes Tesseract availability, version, and timeout failures.
 
 Visual Scan does not persist uploaded originals or create application-managed

@@ -6,7 +6,7 @@ from typing import Literal, Self
 from unicodedata import category
 
 import httpx
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +55,29 @@ class Settings(BaseSettings):
     ai_max_input_chars: int = Field(default=50_000, gt=0)
     ai_max_output_tokens: int = Field(default=1_200, gt=0)
     ai_response_format: Literal["json_object", "prompt_only"] = "json_object"
+    scans_database_path: Path = BACKEND_ROOT / "data" / "visual-scan.db"
+    scans_database_busy_timeout_ms: int = Field(default=5_000, ge=1, le=60_000)
+    scans_max_text_chars: int = Field(default=250_000, gt=0)
+
+    @field_validator("scans_database_path", mode="before")
+    @classmethod
+    def resolve_scans_database_path(cls, value: object) -> Path:
+        """Resolve relative scan database paths from the backend directory."""
+        if isinstance(value, Path):
+            path = value
+        elif isinstance(value, str):
+            raw_path = value.strip()
+            if not raw_path or raw_path == ":memory:":
+                raise ValueError("SCANS_DATABASE_PATH must name a filesystem database file.")
+            path = Path(raw_path)
+        else:
+            raise ValueError("SCANS_DATABASE_PATH must be a filesystem path.")
+
+        if str(path) == ":memory:":
+            raise ValueError("SCANS_DATABASE_PATH does not support in-memory databases.")
+        if not path.is_absolute():
+            path = BACKEND_ROOT / path
+        return path.resolve()
 
     @model_validator(mode="after")
     def validate_ai_configuration(self) -> Self:

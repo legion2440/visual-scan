@@ -15,10 +15,12 @@ as health reporting can consist of only a router and its schemas.
 - `app/factory.py` exposes the side-effect-free `create_app()` factory. Tests
   import this module and inject explicit settings without constructing the
   production application or reading `backend/.env`.
-- The factory installs the application lifespan. Startup creates only the
-  app-local analysis initialization lock; shutdown closes a lazily created
-  analysis service and its HTTP client. No provider connection is created
-  during application construction or health reporting.
+- The factory installs the application lifespan. Startup creates the app-local
+  analysis initialization lock, constructs the resource-free scans service,
+  and bootstraps its SQLite schema in Starlette's thread pool. Shutdown closes
+  a lazily created analysis service and its HTTP client. No provider
+  connection or database file is created during application construction or
+  health reporting.
 - `app/main.py` is the production ASGI entry point. It imports the factory and
   creates `app` for Uvicorn.
 - `app/api/router.py` composes public feature routers.
@@ -136,7 +138,46 @@ JSON request
 - Provider response bodies, API keys, model internals, and full OCR text are
   not included in client-facing errors or application logs.
 
+## Scans request flow
+
+The scans feature stores immutable OCR results and metadata independently from
+the browser archive:
+
+```text
+JSON request
+  → scans router
+  → synchronous scans service in Starlette thread pool
+  → SQLite repository
+```
+
+- The service is the public feature entry point. It sanitizes filenames,
+  preserves non-empty text exactly, enforces the configured text limit,
+  generates UUID4 identifiers and UTC timestamps, and builds compact list
+  snippets. List responses omit full text and structured fields.
+- The repository owns SQL, row mapping, connection configuration, and explicit
+  transactions. Each operation opens and closes its own connection in the same
+  worker thread; no connection is stored in application state.
+- Every connection uses `isolation_level=None`, foreign keys, a bounded busy
+  timeout, `synchronous=FULL`, and a deterministic Unicode `casefold()`
+  function. Writes use `BEGIN IMMEDIATE`; list count and page queries share one
+  read transaction and therefore one snapshot.
+- Startup creates the configured parent directory, enables and verifies WAL
+  outside a transaction, runs `PRAGMA quick_check`, then creates or validates
+  schema version 1. A version-zero database is adopted only when the `scans`
+  table is absent. Unknown versions, malformed tables or indexes, corruption,
+  a directory path, and unavailable storage prevent startup.
+- Search uses parameterized `instr(casefold(...), casefold(...))` expressions,
+  so Unicode case folding is supported and SQL wildcard characters remain
+  literal. Dynamic sort expressions and directions come only from fixed enum
+  mappings; `id ASC` is the final tie-breaker.
+- Stored analysis reuses the analysis feature's public `AnalysisData`
+  contract, while stored OCR language values reuse the OCR feature's public
+  `OcrLanguage` contract. The scans feature does not import either feature's
+  service, pipeline, provider, or other implementation internals.
+- SQLite stores text and analysis/OCR metadata only. Uploaded originals,
+  rendered pages, and thumbnails are not accepted or persisted.
+
 The module map is the navigation source for agents and maintainers. A
-dependency graph generator will be considered after the scans feature exists;
-the current feature set is still too small for that generator to add useful
-information.
+dependency graph generator is deferred until authentication becomes a second
+consumer of SQLite; before that point it would duplicate the module map
+without adding useful navigation.

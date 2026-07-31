@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from app.api.router import api_router
 from app.core.config import Settings, get_settings
@@ -12,6 +13,7 @@ from app.features.analysis.router import (
     initialize_analysis_state,
     shutdown_analysis_service,
 )
+from app.features.scans.service import create_scans_service
 
 
 @asynccontextmanager
@@ -19,6 +21,9 @@ async def application_lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Initialize app-local feature state and release lazy resources."""
     initialize_analysis_state(application)
     try:
+        scans_service = create_scans_service(application.state.settings)
+        application.state.scans_service = scans_service
+        await run_in_threadpool(scans_service.bootstrap)
         yield
     finally:
         await shutdown_analysis_service(application)

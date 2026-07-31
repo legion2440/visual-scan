@@ -1,6 +1,7 @@
 """Shared backend test fixtures."""
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -11,7 +12,7 @@ from app.factory import create_app
 
 
 @pytest.fixture
-def test_settings() -> Settings:
+def test_settings(tmp_path: Path) -> Settings:
     """Return settings isolated from backend/.env."""
     return Settings(
         _env_file=None,
@@ -44,6 +45,9 @@ def test_settings() -> Settings:
         ai_max_input_chars=50_000,
         ai_max_output_tokens=1_200,
         ai_response_format="json_object",
+        scans_database_path=tmp_path / "data" / "visual-scan.db",
+        scans_database_busy_timeout_ms=5_000,
+        scans_max_text_chars=250_000,
     )
 
 

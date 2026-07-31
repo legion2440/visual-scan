@@ -79,6 +79,33 @@
         "backend/tests/test_analysis_pipeline.py",
         "backend/tests/test_openai_compatible_provider.py"
       ]
+    },
+    "scans": {
+      "entrypoint": "backend/app/features/scans/router.py",
+      "contracts": [
+        "backend/app/features/scans/schemas.py"
+      ],
+      "implementation": [
+        "backend/app/features/scans/service.py",
+        "backend/app/features/scans/repository.py",
+        "backend/app/features/scans/schema.py",
+        "backend/app/features/scans/errors.py"
+      ],
+      "owns": [
+        "server-side scan archive",
+        "SQLite scan persistence",
+        "scan search, filtering, sorting, and pagination"
+      ],
+      "depends_on": [
+        "backend/app/core/config.py",
+        "backend/app/features/analysis/schemas.py",
+        "backend/app/features/ocr/schemas.py"
+      ],
+      "tests": [
+        "backend/tests/test_scans_api.py",
+        "backend/tests/test_scans_service.py",
+        "backend/tests/test_sqlite_scan_repository.py"
+      ]
     }
   }
 }

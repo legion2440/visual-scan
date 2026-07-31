@@ -9,7 +9,8 @@ The backend reports health and provides independent server-side OCR with
 in-memory Pillow preprocessing, PDFium rendering, and the system Tesseract
 executable. It also provides optional AI document classification, summaries,
 tags, and structured fields through a configured OpenAI-compatible provider.
-Database storage, authentication, and Docker are not implemented yet.
+It also exposes a SQLite-backed API for saving scan text and analysis/OCR
+metadata. Authentication and Docker are not implemented yet.
 
 ## Features
 
@@ -26,14 +27,16 @@ Database storage, authentication, and Docker are not implemented yet.
 - Independent server-side Tesseract OCR for JPEG, PNG, and WebP uploads.
 - Sequential server-side PDF OCR with page-level text and metadata.
 - Server preprocessing modes: none, grayscale, and binary threshold.
+- SQLite scans API with search, filtering, deterministic sorting, pagination,
+  detail retrieval, deletion, and archive cleanup.
 - Local results archive with sorting, search, classification filtering,
   detail view, deletion, and JSON export.
 - Two views: **Upload & Scan** and **Scanned Results**.
 
-The results archive uses `localStorage`. It is not synchronized with a backend.
-If the browser storage quota is reached, Visual Scan retries the new record
-without its image preview. Existing records and previews are never removed
-automatically.
+The current frontend results archive still uses `localStorage`; frontend
+integration with the server archive is reserved for the next step. If browser
+storage quota is reached, Visual Scan retries the new record without its image
+preview. Existing records and previews are never removed automatically.
 
 ## Browser OCR and server OCR
 
@@ -242,7 +245,8 @@ settings cover:
 - PDF upload byte, page, per-page pixel, and total pixel limits;
 - PDF render DPI and whole-document timeout;
 - optional OpenAI-compatible AI endpoint, model, API key, provider label,
-  response mode, deadline, and input/output limits.
+  response mode, deadline, and input/output limits;
+- SQLite archive path, bounded busy timeout, and maximum stored text length.
 
 `VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
 
@@ -267,6 +271,9 @@ VISUAL_SCAN_AI_TIMEOUT_SECONDS=45
 VISUAL_SCAN_AI_MAX_INPUT_CHARS=50000
 VISUAL_SCAN_AI_MAX_OUTPUT_TOKENS=1200
 VISUAL_SCAN_AI_RESPONSE_FORMAT=json_object
+VISUAL_SCAN_SCANS_DATABASE_PATH=data/visual-scan.db
+VISUAL_SCAN_SCANS_DATABASE_BUSY_TIMEOUT_MS=5000
+VISUAL_SCAN_SCANS_MAX_TEXT_CHARS=250000
 ```
 
 The default allowed frontend origins are `http://localhost:5500` and
@@ -306,7 +313,8 @@ credentials, whitespace or control characters, a query, or a fragment.
 
 The provider receives the sanitized filename, OCR language, and OCR text. It
 does not receive the source image. Analysis results are returned to the
-frontend but are not persisted by the backend. The returned confidence is the
+frontend and are not saved automatically; a client can explicitly include
+them in a later `POST /api/scans` request. The returned confidence is the
 model's self-assessment, not a statistically calibrated probability.
 
 The fixed classification taxonomy is:
@@ -383,6 +391,11 @@ schema-invalid successful responses return 502, unavailable or rejected
 provider configurations return 503, and provider deadlines return 504.
 Client-facing failures do not expose the API key, provider response body, base
 URL, model internals, traceback, or full OCR text.
+
+The scans API rejects whitespace-only text with HTTP 422 and text beyond the
+configured archive limit with 413. Missing records return 404. Locked,
+unavailable, schema-invalid, or corrupt SQLite storage returns a generic 503
+without exposing the database path, SQL, stored row, or full OCR text.
 
 ## Pinned browser dependencies
 
@@ -466,6 +479,67 @@ Supported language identifiers are `eng`, `rus`, `eng+rus`, `deu`, `fra`, and
 confidence from 0 through 1, a non-empty summary of at most 1200 characters,
 at most 10 tags, and at most 20 string label/value fields. Markdown fences,
 surrounding text, unknown classifications, and extra properties are rejected.
+
+Saved scans:
+
+```http
+POST /api/scans
+Content-Type: application/json
+```
+
+Example:
+
+```bash
+curl -i -X POST http://localhost:8000/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"contract.jpg","text":"Full edited OCR text.","analysis":null,"ocr":null}'
+```
+
+The response is `201 Created`, includes a relative `Location` header, and
+returns the server-generated UUID4 and UTC timestamp:
+
+```json
+{
+  "id": "a11aa4fd-3354-4af1-81b5-740ef31afad2",
+  "filename": "contract.jpg",
+  "scanned_at": "2026-07-31T06:30:00Z",
+  "text": "Full edited OCR text.",
+  "analysis": null,
+  "ocr": null
+}
+```
+
+`analysis` may contain the normal classification, confidence, summary, tags,
+structured fields, and a provider label. `ocr` may contain `source`
+(`browser` or `server`), engine, language, optional profile, confidence, and
+word count. Neither object is required. Images, PDFs, thumbnails, client IDs,
+timestamps, and snippets are not accepted.
+
+Archive operations:
+
+```http
+GET /api/scans
+GET /api/scans/{scan_id}
+DELETE /api/scans/{scan_id}
+DELETE /api/scans
+```
+
+List parameters are `limit` (1–200, default 50), `offset`, optional `q`,
+optional taxonomy `classification` or `unclassified`, `sort`
+(`scanned_at`, `filename`, `classification`, or `confidence`), and `order`
+(`asc` or `desc`). List items contain a server-calculated snippet but omit full
+text and structured fields; the detail endpoint returns both. Deleting an
+unknown identifier returns 404, while clearing the archive returns
+`{"deleted": <count>}`.
+
+The default database is `backend/data/visual-scan.db`. Relative paths are
+resolved from `backend/`; absolute deployment paths are allowed. Startup
+creates the parent directory, enables WAL with `synchronous=FULL`, runs an
+integrity check, and strictly validates schema version 1 and its indexes.
+SQLite stores only result text and metadata—never originals or thumbnails.
+The archive endpoints are unauthenticated in this step, so the default backend
+binding remains `127.0.0.1`; public deployment is unsupported until
+authentication is added.
 
 Server-side OCR:
 
@@ -618,7 +692,9 @@ instrumented PDFium doubles with generated in-memory PDFs, and provider tests
 mock `pytesseract.image_to_data()`. Analysis HTTP tests use app-local fake
 services, while provider tests use `httpx.MockTransport`; they never require a
 real AI server or API key. The test suite never requires the system Tesseract
-binary.
+binary. Scans tests use only SQLite databases under pytest `tmp_path`, exercise
+the real application lifespan, and cover schema validation, WAL concurrency,
+transactions, Unicode search, deterministic pagination, and safe failures.
 
 ## Structure
 
@@ -643,15 +719,22 @@ visual-scan/
 │   │   │   ├── health/
 │   │   │   │   ├── router.py
 │   │   │   │   └── schemas.py
-│   │   │   └── ocr/
+│   │   │   ├── ocr/
+│   │   │   │   ├── router.py
+│   │   │   │   ├── schemas.py
+│   │   │   │   ├── service.py
+│   │   │   │   ├── pipeline.py
+│   │   │   │   ├── pdf_pipeline.py
+│   │   │   │   ├── pdf_renderer.py
+│   │   │   │   ├── preprocessing.py
+│   │   │   │   ├── provider.py
+│   │   │   │   └── errors.py
+│   │   │   └── scans/
 │   │   │       ├── router.py
 │   │   │       ├── schemas.py
 │   │   │       ├── service.py
-│   │   │       ├── pipeline.py
-│   │   │       ├── pdf_pipeline.py
-│   │   │       ├── pdf_renderer.py
-│   │   │       ├── preprocessing.py
-│   │   │       ├── provider.py
+│   │   │       ├── repository.py
+│   │   │       ├── schema.py
 │   │   │       └── errors.py
 │   │   ├── factory.py
 │   │   └── main.py
@@ -667,6 +750,9 @@ visual-scan/
 │   │   ├── test_pdf_ocr_api.py
 │   │   ├── test_pdf_ocr_pipeline.py
 │   │   ├── test_pdf_renderer.py
+│   │   ├── test_scans_api.py
+│   │   ├── test_scans_service.py
+│   │   ├── test_sqlite_scan_repository.py
 │   │   └── test_tesseract_provider.py
 │   ├── .env.example
 │   ├── ARCHITECTURE.md
@@ -711,6 +797,8 @@ visual-scan/
 - `backend/app/features/health` owns the health contract and endpoint.
 - `backend/app/features/ocr` owns server-side image and PDF validation,
   serialized PDFium rendering, preprocessing, and Tesseract recognition.
+- `backend/app/features/scans` owns immutable scan contracts, archive
+  invariants, search/list behavior, and SQLite persistence.
 - `backend/module-map.json` is the backend navigation and ownership index.
 - `app.js` connects the interface, state, and user actions.
 - `config.js` contains browser/runtime URLs and safety limits.

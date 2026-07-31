@@ -11,7 +11,7 @@ const ocrDataRootUrl = new URL('./assets/tessdata', import.meta.url).href.replac
 
 export const CONFIG = Object.freeze({
   backendUrl: 'http://localhost:8000',
-  requestTimeoutMs: 45_000,
+  requestTimeoutMs: 60_000,
   healthTimeoutMs: 4_000,
   maxImageBytes: 20 * 1024 * 1024,
   maxImagePixels: 25_000_000,

@@ -14,7 +14,9 @@
       "owns": [
         "backend health reporting"
       ],
-      "depends_on": [],
+      "depends_on": [
+        "backend/app/core/config.py"
+      ],
       "tests": [
         "backend/tests/test_health.py"
       ]
@@ -49,6 +51,33 @@
         "backend/tests/test_pdf_ocr_pipeline.py",
         "backend/tests/test_pdf_renderer.py",
         "backend/tests/test_tesseract_provider.py"
+      ]
+    },
+    "analysis": {
+      "entrypoint": "backend/app/features/analysis/router.py",
+      "contracts": [
+        "backend/app/features/analysis/schemas.py"
+      ],
+      "implementation": [
+        "backend/app/features/analysis/service.py",
+        "backend/app/features/analysis/pipeline.py",
+        "backend/app/features/analysis/provider.py",
+        "backend/app/features/analysis/prompts.py",
+        "backend/app/features/analysis/errors.py"
+      ],
+      "owns": [
+        "AI document classification",
+        "AI document summaries",
+        "AI structured field extraction",
+        "OpenAI-compatible provider integration"
+      ],
+      "depends_on": [
+        "backend/app/core/config.py"
+      ],
+      "tests": [
+        "backend/tests/test_analysis_api.py",
+        "backend/tests/test_analysis_pipeline.py",
+        "backend/tests/test_openai_compatible_provider.py"
       ]
     }
   }

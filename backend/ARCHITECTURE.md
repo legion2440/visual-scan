@@ -15,6 +15,10 @@ as health reporting can consist of only a router and its schemas.
 - `app/factory.py` exposes the side-effect-free `create_app()` factory. Tests
   import this module and inject explicit settings without constructing the
   production application or reading `backend/.env`.
+- The factory installs the application lifespan. Startup creates only the
+  app-local analysis initialization lock; shutdown closes a lazily created
+  analysis service and its HTTP client. No provider connection is created
+  during application construction or health reporting.
 - `app/main.py` is the production ASGI entry point. It imports the factory and
   creates `app` for Uvicorn.
 - `app/api/router.py` composes public feature routers.
@@ -93,7 +97,46 @@ Visual Scan does not persist uploaded originals or create application-managed
 temporary files. FastAPI's multipart parser and pytesseract may use system
 temporary storage; pytesseract cleans up the files it creates after OCR.
 
+## Analysis request flow
+
+The analysis feature is independent from OCR execution. It accepts text that
+the caller already extracted:
+
+```text
+JSON request
+  → analysis router
+  → async analysis service
+  → analysis pipeline
+    → versioned prompt builder
+    → OpenAI-compatible HTTP provider
+    → strict provider-result validation
+```
+
+- The service validates the OCR-text character limit, rejects whitespace-only
+  input, sanitizes the filename, and injects the configured provider name into
+  the public response.
+- The prompt builder keeps filename, language, and OCR text in the user
+  message. The system prompt fixes the taxonomy and treats all document text
+  as untrusted data rather than instructions.
+- The provider owns the OpenAI-compatible `/chat/completions` HTTP protocol,
+  sends one non-streaming request without retries, and accepts exactly one JSON
+  object from `choices[0].message.content`.
+- The pipeline validates classification, confidence, summary, tags, and
+  structured fields with strict Pydantic contracts. It never repairs an
+  invalid response, silently truncates output, or changes an unknown
+  classification to `other`.
+- One `httpx.AsyncClient` is created lazily per application and shared between
+  analysis requests. An app-local `asyncio.Lock` serializes first
+  initialization only; provider calls remain concurrent.
+- The configured AI timeout is a whole-call deadline enforced with
+  `asyncio.timeout()`. HTTPX connect, read, write, and pool timeouts use the
+  same budget. Provider timeouts map to HTTP 504.
+- Health reads only validated application settings. `ai_available` means AI is
+  enabled and configured; it is not a live provider check.
+- Provider response bodies, API keys, model internals, and full OCR text are
+  not included in client-facing errors or application logs.
+
 The module map is the navigation source for agents and maintainers. A
-dependency graph generator will be considered after OCR, analysis, and scans
-features exist; the current feature set is still too small for that generator
-to add useful information.
+dependency graph generator will be considered after the scans feature exists;
+the current feature set is still too small for that generator to add useful
+information.

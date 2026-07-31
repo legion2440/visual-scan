@@ -7,8 +7,9 @@ document image or camera capture, lets the user prepare the page on a
 
 The backend reports health and provides independent server-side OCR with
 in-memory Pillow preprocessing, PDFium rendering, and the system Tesseract
-executable. AI analysis, database storage, authentication, and Docker are not
-implemented yet.
+executable. It also provides optional AI document classification, summaries,
+tags, and structured fields through a configured OpenAI-compatible provider.
+Database storage, authentication, and Docker are not implemented yet.
 
 ## Features
 
@@ -20,7 +21,7 @@ implemented yet.
   profiles.
 - English, Russian, English + Russian, German, French, and Spanish selections.
 - Editable extracted text.
-- Optional AI analysis request to a configured backend.
+- Optional AI analysis through a configurable OpenAI-compatible provider.
 - FastAPI application factory with CORS and `GET /api/health`.
 - Independent server-side Tesseract OCR for JPEG, PNG, and WebP uploads.
 - Sequential server-side PDF OCR with page-level text and metadata.
@@ -239,7 +240,9 @@ settings cover:
 - per-call image OCR timeout;
 - image upload byte and decoded pixel limits;
 - PDF upload byte, page, per-page pixel, and total pixel limits;
-- PDF render DPI and whole-document timeout.
+- PDF render DPI and whole-document timeout;
+- optional OpenAI-compatible AI endpoint, model, API key, provider label,
+  response mode, deadline, and input/output limits.
 
 `VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
 
@@ -255,10 +258,66 @@ VISUAL_SCAN_MAX_PDF_PAGE_PIXELS=25000000
 VISUAL_SCAN_MAX_PDF_TOTAL_PIXELS=200000000
 VISUAL_SCAN_PDF_RENDER_DPI=300
 VISUAL_SCAN_PDF_TIMEOUT_SECONDS=180
+VISUAL_SCAN_AI_ENABLED=false
+VISUAL_SCAN_AI_BASE_URL=
+VISUAL_SCAN_AI_API_KEY=
+VISUAL_SCAN_AI_MODEL=
+VISUAL_SCAN_AI_PROVIDER_NAME=openai-compatible
+VISUAL_SCAN_AI_TIMEOUT_SECONDS=45
+VISUAL_SCAN_AI_MAX_INPUT_CHARS=50000
+VISUAL_SCAN_AI_MAX_OUTPUT_TOKENS=1200
+VISUAL_SCAN_AI_RESPONSE_FORMAT=json_object
 ```
 
 The default allowed frontend origins are `http://localhost:5500` and
 `http://127.0.0.1:5500`.
+
+## AI document analysis
+
+AI is disabled by default. To use a local OpenAI-compatible server, configure
+`backend/.env` with its base API path and model:
+
+```dotenv
+VISUAL_SCAN_AI_ENABLED=true
+VISUAL_SCAN_AI_BASE_URL=http://127.0.0.1:1234/v1
+VISUAL_SCAN_AI_API_KEY=
+VISUAL_SCAN_AI_MODEL=local-document-model
+VISUAL_SCAN_AI_PROVIDER_NAME=local-llm
+VISUAL_SCAN_AI_RESPONSE_FORMAT=json_object
+```
+
+For a remote provider, use its HTTPS base URL and API key:
+
+```dotenv
+VISUAL_SCAN_AI_ENABLED=true
+VISUAL_SCAN_AI_BASE_URL=https://provider.example/v1
+VISUAL_SCAN_AI_API_KEY=replace-with-a-secret
+VISUAL_SCAN_AI_MODEL=document-model
+VISUAL_SCAN_AI_PROVIDER_NAME=remote-provider
+```
+
+When AI is enabled, the base URL and model are required. The API key remains
+optional for local servers and is stored as a Pydantic `SecretStr`.
+`json_object` sends `response_format={"type":"json_object"}`;
+`prompt_only` supports servers that do not implement that parameter. Visual
+Scan never retries automatically or silently changes response mode.
+
+The provider receives the sanitized filename, OCR language, and OCR text. It
+does not receive the source image. Analysis results are returned to the
+frontend but are not persisted by the backend. The returned confidence is the
+model's self-assessment, not a statistically calibrated probability.
+
+The fixed classification taxonomy is:
+
+```text
+invoice, receipt, contract, letter, form, report, statement,
+identity_document, certificate, business_card, note, other
+```
+
+The 45-second backend deadline covers the whole provider request. The frontend
+waits 60 seconds so a backend 504 response arrives before the browser aborts
+the request. Health reports configured availability only and never probes the
+external provider.
 
 ## Frontend configuration
 
@@ -270,7 +329,8 @@ frontend/config.js
 
 The backend URL defaults to `http://localhost:8000`. Change
 `CONFIG.backendUrl` when the backend runs elsewhere. Every application backend
-request is implemented in `frontend/utils/api.js`.
+request is implemented in `frontend/utils/api.js`. The general request timeout
+is 60 seconds; health uses its separate four-second timeout.
 
 The environment-neutral OCR registry lives in `frontend/ocrProfiles.js`.
 Browser code and both Node.js setup scripts import it, so profile identifiers,
@@ -315,6 +375,13 @@ temporary files. FastAPI's multipart parser and pytesseract may use system
 temporary storage; pytesseract cleans up the files it creates after OCR.
 Strict zero-disk upload handling is outside this step.
 
+AI analysis accepts at most 50,000 OCR-text characters by default and rejects
+whitespace-only input. Provider rate limits return HTTP 429, malformed or
+schema-invalid successful responses return 502, unavailable or rejected
+provider configurations return 503, and provider deadlines return 504.
+Client-facing failures do not expose the API key, provider response body, base
+URL, model internals, traceback, or full OCR text.
+
 ## Pinned browser dependencies
 
 The Tesseract browser script and worker use `5.1.1`; the WebAssembly core uses
@@ -346,6 +413,57 @@ Example response:
   "provider": null
 }
 ```
+
+When AI is enabled and configured, health returns the configured provider
+label without making an external request:
+
+```json
+{
+  "status": "ok",
+  "ai_available": true,
+  "provider": "local-llm"
+}
+```
+
+AI document analysis:
+
+```http
+POST /api/ai/analyze
+Content-Type: application/json
+```
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/api/ai/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"contract.jpg","text":"Recognized document text...","language":"eng"}'
+```
+
+Example response:
+
+```json
+{
+  "filename": "contract.jpg",
+  "classification": "contract",
+  "confidence": 0.93,
+  "summary": "Employment agreement between the named parties.",
+  "tags": ["legal", "employment"],
+  "fields": [
+    {
+      "label": "Effective date",
+      "value": "2026-07-30"
+    }
+  ],
+  "provider": "local-llm"
+}
+```
+
+Supported language identifiers are `eng`, `rus`, `eng+rus`, `deu`, `fra`, and
+`spa`. The provider must return exactly one JSON object with a taxonomy value,
+confidence from 0 through 1, a non-empty summary of at most 1200 characters,
+at most 10 tags, and at most 20 string label/value fields. Markdown fences,
+surrounding text, unknown classifications, and extra properties are rejected.
 
 Server-side OCR:
 
@@ -478,11 +596,6 @@ binary or language data, and 504 for a processing deadline. Unexpected
 internal render or provider failures return a generic 500 response without
 local paths or tracebacks.
 
-`POST /api/ai/analyze` is intentionally absent. Until the analysis feature is
-implemented, that request receives HTTP 404. The frontend treats a received
-HTTP response as proof that the backend is reachable and keeps local image/OCR
-processing available.
-
 ## Tests and checks
 
 Run backend tests and static checks from the repository root:
@@ -500,8 +613,10 @@ parent traversal, paths that resolve outside the repository, and references to
 missing files. OCR API tests replace the service dependency, pipeline tests
 use in-memory Pillow images and fake providers, PDF renderer tests combine
 instrumented PDFium doubles with generated in-memory PDFs, and provider tests
-mock `pytesseract.image_to_data()`. The test suite never requires the system
-Tesseract binary.
+mock `pytesseract.image_to_data()`. Analysis HTTP tests use app-local fake
+services, while provider tests use `httpx.MockTransport`; they never require a
+real AI server or API key. The test suite never requires the system Tesseract
+binary.
 
 ## Structure
 
@@ -515,6 +630,14 @@ visual-scan/
 │   │   ├── core/
 │   │   │   └── config.py
 │   │   ├── features/
+│   │   │   ├── analysis/
+│   │   │   │   ├── router.py
+│   │   │   │   ├── schemas.py
+│   │   │   │   ├── service.py
+│   │   │   │   ├── pipeline.py
+│   │   │   │   ├── provider.py
+│   │   │   │   ├── prompts.py
+│   │   │   │   └── errors.py
 │   │   │   ├── health/
 │   │   │   │   ├── router.py
 │   │   │   │   └── schemas.py
@@ -532,8 +655,11 @@ visual-scan/
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
+│   │   ├── test_analysis_api.py
+│   │   ├── test_analysis_pipeline.py
 │   │   ├── test_health.py
 │   │   ├── test_module_map.py
+│   │   ├── test_openai_compatible_provider.py
 │   │   ├── test_ocr_api.py
 │   │   ├── test_ocr_pipeline.py
 │   │   ├── test_pdf_ocr_api.py
@@ -578,6 +704,8 @@ visual-scan/
 - `backend/app/main.py` creates the production ASGI application for Uvicorn.
 - `backend/app/api/router.py` composes public feature routers.
 - `backend/app/core/config.py` owns environment-backed settings.
+- `backend/app/features/analysis` owns AI document analysis and the
+  OpenAI-compatible provider boundary.
 - `backend/app/features/health` owns the health contract and endpoint.
 - `backend/app/features/ocr` owns server-side image and PDF validation,
   serialized PDFium rendering, preprocessing, and Tesseract recognition.

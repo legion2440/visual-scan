@@ -27,13 +27,11 @@ async def test_health_returns_exact_json_contract(client: AsyncClient) -> None:
     assert response.json()["ai_available"] is False
 
 
-async def test_openapi_contains_health_but_not_ai_analysis(client: AsyncClient) -> None:
+async def test_openapi_contains_health_and_ai_analysis(client: AsyncClient) -> None:
     paths = (await client.get("/openapi.json")).json()["paths"]
 
     assert "/api/health" in paths
-    assert "/api/ai/analyze" not in paths
-    response = await client.post("/api/ai/analyze", json={"text": "not implemented"})
-    assert response.status_code == 404
+    assert "/api/ai/analyze" in paths
 
 
 @pytest.mark.parametrize(
@@ -113,3 +111,72 @@ async def test_get_settings_returns_cached_instance(
         assert calls == 1
     finally:
         get_settings.cache_clear()
+
+
+async def test_health_reports_enabled_configuration_without_creating_service(
+    test_settings: Settings,
+) -> None:
+    settings = test_settings.model_copy(
+        update={
+            "ai_enabled": True,
+            "ai_base_url": "http://provider.test/v1",
+            "ai_model": "test-model",
+            "ai_provider_name": "local-llm",
+        }
+    )
+    application = create_app(settings)
+
+    async with application.router.lifespan_context(application):
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+            response = await test_client.get("/api/health")
+
+        assert not hasattr(application.state, "_visual_scan_analysis_service")
+
+    assert response.json() == {
+        "status": "ok",
+        "ai_available": True,
+        "provider": "local-llm",
+    }
+
+
+async def test_enabled_ai_requires_base_url_and_model() -> None:
+    with pytest.raises(ValueError, match="AI_BASE_URL, AI_MODEL"):
+        Settings(
+            _env_file=None,
+            ai_enabled=True,
+            ai_base_url="",
+            ai_model="",
+        )
+
+
+async def test_disabled_ai_ignores_empty_provider_configuration() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_enabled=False,
+        ai_base_url="not a URL",
+        ai_model="",
+        ai_provider_name="",
+    )
+
+    assert settings.ai_enabled is False
+    assert settings.ai_provider_name == ""
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "file:///tmp/provider",
+        "http://user:secret@provider.test/v1",
+        "http://provider.test/v1?query=yes",
+        "http://provider.test:invalid/v1",
+    ],
+)
+async def test_enabled_ai_rejects_unsafe_or_invalid_base_url(base_url: str) -> None:
+    with pytest.raises(ValueError, match="AI_BASE_URL"):
+        Settings(
+            _env_file=None,
+            ai_enabled=True,
+            ai_base_url=base_url,
+            ai_model="document-model",
+        )

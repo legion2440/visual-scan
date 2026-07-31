@@ -35,6 +35,15 @@ def test_settings() -> Settings:
         max_pdf_total_pixels=200_000_000,
         pdf_render_dpi=300,
         pdf_timeout_seconds=180,
+        ai_enabled=False,
+        ai_base_url="",
+        ai_api_key="",
+        ai_model="",
+        ai_provider_name="openai-compatible",
+        ai_timeout_seconds=45,
+        ai_max_input_chars=50_000,
+        ai_max_output_tokens=1_200,
+        ai_response_format="json_object",
     )
 
 
@@ -53,6 +62,7 @@ def anyio_backend() -> str:
 @pytest.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     """Yield an HTTPX client connected directly to the ASGI application."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
-        yield test_client
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+            yield test_client

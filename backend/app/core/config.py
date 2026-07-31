@@ -2,8 +2,10 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +45,58 @@ class Settings(BaseSettings):
     max_pdf_total_pixels: int = Field(default=200_000_000, gt=0)
     pdf_render_dpi: int = Field(default=300, ge=72, le=600)
     pdf_timeout_seconds: int = Field(default=180, gt=0)
+    ai_enabled: bool = False
+    ai_base_url: str = ""
+    ai_api_key: SecretStr = SecretStr("")
+    ai_model: str = ""
+    ai_provider_name: str = "openai-compatible"
+    ai_timeout_seconds: float = Field(default=45, gt=0)
+    ai_max_input_chars: int = Field(default=50_000, gt=0)
+    ai_max_output_tokens: int = Field(default=1_200, gt=0)
+    ai_response_format: Literal["json_object", "prompt_only"] = "json_object"
+
+    @model_validator(mode="after")
+    def validate_ai_configuration(self) -> Self:
+        """Normalize AI settings and reject incomplete enabled deployments."""
+        self.ai_base_url = self.ai_base_url.strip().rstrip("/")
+        self.ai_model = self.ai_model.strip()
+        self.ai_provider_name = self.ai_provider_name.strip()
+
+        if not self.ai_enabled:
+            return self
+        if not self.ai_provider_name:
+            raise ValueError("AI provider name must not be empty when AI is enabled.")
+
+        missing = [
+            name
+            for name, value in (
+                ("AI_BASE_URL", self.ai_base_url),
+                ("AI_MODEL", self.ai_model),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "AI is enabled but required settings are missing: " + ", ".join(missing)
+            )
+
+        parsed_url = urlsplit(self.ai_base_url)
+        try:
+            _ = parsed_url.port
+        except ValueError as error:
+            raise ValueError("AI_BASE_URL contains an invalid port.") from error
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.query
+            or parsed_url.fragment
+            or parsed_url.username
+            or parsed_url.password
+        ):
+            raise ValueError(
+                "AI_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment."
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

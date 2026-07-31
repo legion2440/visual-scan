@@ -355,10 +355,10 @@ a fresh `GET /api/auth/session`. A hint containing a different user ID or
 same-user hint use non-destructive verification: current save, mutation, OCR,
 AI, export, and list requests continue. A verification network/timeout/HTTP
 failure preserves identity, CSRF, editor, and archive state while marking the
-session verification unavailable. Only an exact anonymous response, a current
-protected 401, or a confirmed different user clears account-derived state.
-Stale 401 responses from a rotated same-user session are distinguished by the
-request's CSRF snapshot and cannot log out the replacement session.
+session verification unavailable. A protected 401 also starts non-destructive
+session verification instead of clearing local state directly. Only an exact
+anonymous response or a confirmed different user clears account-derived state,
+so an old 401 cannot win a race with same-user session rotation.
 
 The exact SQLite v1 archive is migrated to a separate `legacy_scans` table.
 Nothing is assigned automatically. The first registered user sees an explicit
@@ -895,8 +895,9 @@ protected 401 behavior,
 Origin/CSRF enforcement, Argon2 hashing, dummy verification, atomic login
 rotation/rate-bucket cleanup, expiry/touch timing, HMAC rate limits, cross-user
 404 isolation, and atomic one-time legacy claim. Frontend tests also cover
-auth/CSRF generation guards, soft versus boundary revalidation, preservation
-on verification failure, cross-tab identity messages, graceful
+auth/CSRF generation guards, soft versus boundary revalidation, confirmation
+of protected 401 responses, preservation on verification failure, cross-tab
+identity messages, graceful
 BroadcastChannel fallback, and persistent editor provenance. The dependency
 graph check rejects undeclared cross-feature imports and stale generated output.
 

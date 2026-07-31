@@ -119,8 +119,9 @@ so already-sent mutations and list requests are not aborted or silently
 discarded. Verification failure preserves the current identity, CSRF, editor,
 and archive while exposing an unavailable indicator. An exact anonymous or
 different-user response then performs the hard boundary transition and clears
-account-derived state before loading any replacement archive. Stale 401s from a
-rotated same-user session are identified by their request CSRF snapshot.
+account-derived state before loading any replacement archive. Protected 401s
+also trigger this non-destructive verification and never clear identity by
+themselves, so an old response cannot beat a same-user session rotation.
 BroadcastChannel absence degrades to focus/visibility verification rather than
 disabling authentication.
 

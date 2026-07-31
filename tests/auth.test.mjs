@@ -10,13 +10,13 @@ import {
   codePointLength,
   identityChanged,
   isAuthRequestCurrent,
-  isAuthRequestSessionCurrent,
   isAuthRevisionCurrent,
   isServerDerivedEditor,
   normalizeAuthSession,
   normalizeUsername,
   planAuthRevalidation,
   planAuthVerificationFailure,
+  planProtectedUnauthorized,
   provenanceForOcrSource,
   serverFeaturesAvailable,
   validatePassword,
@@ -128,7 +128,6 @@ test('ordinary focus revalidation preserves in-flight save and list generations'
   });
   assert.deepEqual(sameUserHintPlan, focusPlan);
   assert.equal(isAuthRequestCurrent(auth, saveSnapshot), true);
-  assert.equal(isAuthRequestSessionCurrent(auth, saveSnapshot), true);
 });
 
 test('identity mismatch is the only hint that immediately invalidates protected state', () => {
@@ -171,7 +170,7 @@ test('authenticated verification failure preserves identity, CSRF, and derived s
   });
 });
 
-test('same-user session rotation distinguishes stale 401 without discarding success', () => {
+test('same-user rotation confirms an early old 401 before clearing derived state', () => {
   const auth = {
     status: 'authenticated',
     user: { id: 'one' },
@@ -179,10 +178,37 @@ test('same-user session rotation distinguishes stale 401 without discarding succ
     revision: 7,
   };
   const request = authRequestSnapshot(auth);
-  const rotated = { ...auth, csrfToken: 'csrf-two' };
+  const editor = { provenance: EDITOR_PROVENANCE.SERVER_OCR, text: 'server OCR' };
+  const archive = [{ id: 'scan-one' }];
+  const sameUserHint = planAuthRevalidation(auth, {
+    hasIdentityHint: true,
+    identityHint: 'one',
+  });
+  const unauthorized = planProtectedUnauthorized(auth, request);
+  const verified = normalizeAuthSession({
+    authenticated: true,
+    user: {
+      id: 'one',
+      username: 'user-one',
+      created_at: '2026-01-01T00:00:00Z',
+      is_initial_user: false,
+    },
+    csrf_token: 'csrf-two',
+  });
 
-  assert.equal(isAuthRequestCurrent(rotated, request), true);
-  assert.equal(isAuthRequestSessionCurrent(rotated, request), false);
+  assert.equal(sameUserHint.mode, AUTH_REVALIDATION_MODE.SOFT);
+  assert.deepEqual(unauthorized, {
+    revalidate: true,
+    clearIdentity: false,
+    clearServerDerived: false,
+  });
+  assert.equal(identityChanged(auth.user, verified.user), false);
+  assert.equal(verified.csrfToken, 'csrf-two');
+  assert.deepEqual(editor, {
+    provenance: EDITOR_PROVENANCE.SERVER_OCR,
+    text: 'server OCR',
+  });
+  assert.deepEqual(archive, [{ id: 'scan-one' }]);
 });
 
 test('editor provenance survives OCR metadata invalidation decisions', () => {

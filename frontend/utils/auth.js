@@ -111,7 +111,6 @@ export function authRequestSnapshot(authState) {
   return Object.freeze({
     revision: authState.revision,
     userId: authState.status === 'authenticated' ? authState.user?.id || null : null,
-    csrfToken: authState.status === 'authenticated' ? authState.csrfToken || null : null,
   });
 }
 
@@ -124,9 +123,13 @@ export function isAuthRequestCurrent(authState, snapshot) {
   );
 }
 
-export function isAuthRequestSessionCurrent(authState, snapshot) {
-  return isAuthRequestCurrent(authState, snapshot)
-    && authState.csrfToken === snapshot.csrfToken;
+export function planProtectedUnauthorized(authState, snapshot) {
+  const revalidate = isAuthRequestCurrent(authState, snapshot);
+  return Object.freeze({
+    revalidate,
+    clearIdentity: false,
+    clearServerDerived: false,
+  });
 }
 
 export function planAuthRevalidation(

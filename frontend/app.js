@@ -49,13 +49,13 @@ import {
   authRequestSnapshot,
   identityChanged,
   isAuthRequestCurrent,
-  isAuthRequestSessionCurrent,
   isAuthRevisionCurrent,
   isServerDerivedEditor,
   normalizeAuthSession,
   normalizeUsername,
   planAuthRevalidation,
   planAuthVerificationFailure,
+  planProtectedUnauthorized,
   provenanceForOcrSource,
   serverFeaturesAvailable,
   validatePassword,
@@ -365,20 +365,19 @@ function becomeAnonymous(message = '') {
 }
 
 function handleProtectedApiError(error, requestAuth) {
-  if (requestAuth && !protectedRequestIsCurrent(requestAuth)) return true;
-  applyApiReachability(error);
   if (error instanceof ApiError && error.status === 401) {
-    if (requestAuth && !isAuthRequestSessionCurrent(state.auth, requestAuth)) {
-      notice(
-        'A request from the previous session was rejected. Your current session is unchanged.',
-        'info',
-      );
-      return true;
-    }
-    becomeAnonymous('Your session ended. Sign in again to use server features.');
-    publishAuthIdentity();
+    const transition = planProtectedUnauthorized(state.auth, requestAuth);
+    if (!transition.revalidate) return true;
+    applyApiReachability(error);
+    scheduleAuthRevalidation();
+    notice(
+      'A server request was rejected. Verifying the current session before changing your work.',
+      'info',
+    );
     return true;
   }
+  if (requestAuth && !protectedRequestIsCurrent(requestAuth)) return true;
+  applyApiReachability(error);
   return false;
 }
 
@@ -2047,7 +2046,8 @@ async function verifyAuthenticatedSession() {
     }
 
     if (session.status === 'anonymous') {
-      becomeAnonymous();
+      becomeAnonymous('Your session ended. Sign in again to use server features.');
+      publishAuthIdentity();
       return;
     }
 
@@ -2155,6 +2155,7 @@ el('btn-logout').addEventListener('click', async () => {
   cancelAuthVerification();
   state.auth.revision += 1;
   const revision = state.auth.revision;
+  const requestAuth = beginProtectedRequest();
   cancelAuthBoundRequests();
   state.auth.busy = true;
   const controller = new AbortController();
@@ -2169,6 +2170,7 @@ el('btn-logout').addEventListener('click', async () => {
     notice('Signed out. Browser OCR and manual text remain available.', 'ok');
   } catch (error) {
     if (!isAuthRevisionCurrent(state.auth, revision) || error?.kind === 'cancelled') return;
+    if (handleProtectedApiError(error, requestAuth)) return;
     applyApiReachability(error);
     notice(`Could not sign out: ${error.message}`, 'error');
   } finally {

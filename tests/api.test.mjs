@@ -237,7 +237,7 @@ test('auth transport includes credentials and scopes in-memory CSRF to unsafe re
   assert.equal(calls[4].options.headers['X-CSRF-Token'], 'memory-only-csrf');
 });
 
-test('a 401 clears CSRF before the next unsafe request', async (t) => {
+test('a 401 preserves CSRF until session verification confirms anonymous state', async (t) => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   t.after(() => {
@@ -254,11 +254,14 @@ test('a 401 clears CSRF before the next unsafe request', async (t) => {
 
   await assert.rejects(api.clearScans(), { status: 401 });
   await api.clearScans();
+  api.clearCsrfToken();
+  await api.clearScans();
   assert.equal(calls[0].headers['X-CSRF-Token'], 'expired-csrf');
-  assert.equal(calls[1].headers, undefined);
+  assert.equal(calls[1].headers['X-CSRF-Token'], 'expired-csrf');
+  assert.equal(calls[2].headers, undefined);
 });
 
-test('a stale 401 cannot clear a newer CSRF generation', async (t) => {
+test('a stale 401 cannot disturb an explicitly rotated CSRF token', async (t) => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   let finishOldRequest;

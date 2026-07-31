@@ -9,7 +9,6 @@
 import { CONFIG } from '../config.js';
 
 let csrfToken = null;
-let csrfRevision = 0;
 
 function csrfExempt(path) {
   return path === '/api/auth/register' || path === '/api/auth/login';
@@ -113,7 +112,6 @@ export async function request(path, {
   const isFormData = body instanceof FormData;
   const serializedBody = body == null || isFormData ? body : JSON.stringify(body);
   const requestCsrfToken = csrfToken;
-  const requestCsrfRevision = csrfRevision;
 
   try {
     const response = await fetch(buildUrl(path, query), {
@@ -125,10 +123,6 @@ export async function request(path, {
     });
     const payload = await readPayload(response);
     if (!response.ok) {
-      if (response.status === 401 && csrfRevision === requestCsrfRevision) {
-        csrfToken = null;
-        csrfRevision += 1;
-      }
       throw new ApiError(responseErrorMessage(payload, method, path, response.status), {
         status: response.status,
         kind: 'http',
@@ -180,11 +174,9 @@ function pdfForm(file, { language, preprocessing, threshold, password }) {
 export const api = Object.freeze({
   setCsrfToken: (value) => {
     csrfToken = typeof value === 'string' && value ? value : null;
-    csrfRevision += 1;
   },
   clearCsrfToken: () => {
     csrfToken = null;
-    csrfRevision += 1;
   },
   authSession: ({ signal } = {}) => request('/api/auth/session', {
     timeoutMs: CONFIG.archiveTimeoutMs,

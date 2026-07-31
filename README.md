@@ -392,10 +392,12 @@ provider configurations return 503, and provider deadlines return 504.
 Client-facing failures do not expose the API key, provider response body, base
 URL, model internals, traceback, or full OCR text.
 
-The scans API rejects whitespace-only text with HTTP 422 and text beyond the
-configured archive limit with 413. Missing records return 404. Locked,
-unavailable, schema-invalid, or corrupt SQLite storage returns a generic 503
-without exposing the database path, SQL, stored row, or full OCR text.
+The scans API rejects whitespace-only text, embedded null characters, and
+strings that are not strict UTF-8/Unicode scalar sequences with HTTP 422. Text
+beyond the configured archive limit returns 413. Missing records return 404.
+Locked, unavailable, schema-invalid, or corrupt SQLite storage returns a
+generic 503 without exposing the database path, SQL, stored row, or full OCR
+text. Validation responses do not reflect rejected input values.
 
 ## Pinned browser dependencies
 
@@ -515,6 +517,13 @@ structured fields, and a provider label. `ocr` may contain `source`
 word count. Neither object is required. Images, PDFs, thumbnails, client IDs,
 timestamps, and snippets are not accepted.
 
+Archive metadata has storage-specific limits: filename 255 characters,
+provider and each tag 100, structured-field label 200, structured-field value
+5000, OCR engine 100, and OCR profile 50. These limits do not alter the
+`visual-scan-analysis-v1` provider contract used by `/api/ai/analyze`; the AI
+contract continues to enforce tag and field counts without adding unprompted
+per-value length constraints.
+
 Archive operations:
 
 ```http
@@ -524,13 +533,13 @@ DELETE /api/scans/{scan_id}
 DELETE /api/scans
 ```
 
-List parameters are `limit` (1–200, default 50), `offset`, optional `q`,
-optional taxonomy `classification` or `unclassified`, `sort`
-(`scanned_at`, `filename`, `classification`, or `confidence`), and `order`
-(`asc` or `desc`). List items contain a server-calculated snippet but omit full
-text and structured fields; the detail endpoint returns both. Deleting an
-unknown identifier returns 404, while clearing the archive returns
-`{"deleted": <count>}`.
+List parameters are `limit` (1–200, default 50), `offset` (0 through
+9223372036854775807), optional `q`, optional taxonomy `classification` or
+`unclassified`, `sort` (`scanned_at`, `filename`, `classification`, or
+`confidence`), and `order` (`asc` or `desc`). List items contain a
+server-calculated snippet but omit full text and structured fields; the detail
+endpoint returns both. Deleting an unknown identifier returns 404, while
+clearing the archive returns `{"deleted": <count>}`.
 
 The default database is `backend/data/visual-scan.db`. Relative paths are
 resolved from `backend/`; absolute deployment paths are allowed. Startup

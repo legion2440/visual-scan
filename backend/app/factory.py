@@ -3,8 +3,10 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.api.router import api_router
@@ -14,6 +16,18 @@ from app.features.analysis.router import (
     shutdown_analysis_service,
 )
 from app.features.scans.service import create_scans_service
+
+
+async def safe_request_validation_handler(
+    _request: Request,
+    error: RequestValidationError,
+) -> JSONResponse:
+    """Return validation details without reflecting unsafe request values."""
+    details = [
+        {key: value for key, value in item.items() if key in {"type", "loc", "msg"}}
+        for item in error.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": details})
 
 
 @asynccontextmanager
@@ -38,6 +52,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=application_lifespan,
     )
     application.state.settings = app_settings
+    application.add_exception_handler(
+        RequestValidationError,
+        safe_request_validation_handler,
+    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,

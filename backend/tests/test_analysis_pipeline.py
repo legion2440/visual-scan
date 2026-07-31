@@ -14,7 +14,7 @@ from app.features.analysis.errors import (
     ProviderResponseError,
 )
 from app.features.analysis.pipeline import AnalysisPipeline
-from app.features.analysis.prompts import SYSTEM_PROMPT, TAXONOMY
+from app.features.analysis.prompts import PROMPT_VERSION, SYSTEM_PROMPT, TAXONOMY
 from app.features.analysis.schemas import AnalysisLanguage
 from app.features.analysis.service import AnalysisService
 
@@ -146,6 +146,32 @@ async def test_tags_and_fields_are_normalized_without_synthesizing_fields() -> N
         language=AnalysisLanguage.ENGLISH,
     )
     assert empty_result.fields == []
+
+
+async def test_provider_contract_does_not_add_scans_metadata_length_limits() -> None:
+    service, _ = build_service(
+        {
+            **VALID_RESULT,
+            "tags": ["x" * 101],
+            "fields": [
+                {
+                    "label": "l" * 201,
+                    "value": "v" * 5_001,
+                }
+            ],
+        }
+    )
+
+    result = await service.analyze(
+        filename="contract.jpg",
+        text="Document text",
+        language=AnalysisLanguage.ENGLISH,
+    )
+
+    assert len(result.tags[0]) == 101
+    assert len(result.fields[0].label) == 201
+    assert len(result.fields[0].value) == 5_001
+    assert PROMPT_VERSION == "visual-scan-analysis-v1"
 
 
 @pytest.mark.parametrize(

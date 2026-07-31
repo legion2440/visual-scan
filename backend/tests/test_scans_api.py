@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -173,6 +175,29 @@ async def test_list_pagination_search_filter_and_sort(client: AsyncClient) -> No
     assert invoices.json()["items"][0]["filename"] == "Beta.jpg"
 
 
+async def test_offset_beyond_sqlite_integer_range_returns_422(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(
+        "/api/scans",
+        params={"offset": 10_000_000_000_000_000_000_000_000_000},
+    )
+
+    assert response.status_code == 422
+    assert all("input" not in item for item in response.json()["detail"])
+
+
+async def test_maximum_sqlite_offset_is_accepted(client: AsyncClient) -> None:
+    response = await client.get(
+        "/api/scans",
+        params={"offset": 9_223_372_036_854_775_807},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert response.json()["offset"] == 9_223_372_036_854_775_807
+
+
 async def test_delete_one_and_clear_contracts(client: AsyncClient) -> None:
     first = (await create_scan(client)).json()["id"]
     second = (
@@ -256,6 +281,83 @@ async def test_whitespace_text_returns_422(client: AsyncClient) -> None:
 
     assert response.status_code == 422
     assert response.json() == {"detail": "Scan text must not be empty."}
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "filename",
+        "text",
+        "summary",
+        "tag",
+        "field_label",
+        "field_value",
+        "provider",
+        "ocr_engine",
+        "ocr_profile",
+    ],
+)
+async def test_lone_surrogates_in_stored_strings_return_422(
+    client: AsyncClient,
+    target: str,
+) -> None:
+    payload = deepcopy(FULL_PAYLOAD)
+    surrogate = "\ud800"
+    if target in {"filename", "text"}:
+        payload[target] = surrogate
+    elif target == "summary":
+        payload["analysis"]["summary"] = surrogate
+    elif target == "tag":
+        payload["analysis"]["tags"] = [surrogate]
+    elif target == "field_label":
+        payload["analysis"]["fields"][0]["label"] = surrogate
+    elif target == "field_value":
+        payload["analysis"]["fields"][0]["value"] = surrogate
+    elif target == "provider":
+        payload["analysis"]["provider"] = surrogate
+    elif target == "ocr_engine":
+        payload["ocr"]["engine"] = surrogate
+    else:
+        payload["ocr"]["profile"] = surrogate
+
+    raw_json = json.dumps(payload, ensure_ascii=True).encode("ascii")
+    response = await client.post(
+        "/api/scans",
+        content=raw_json,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert all("input" not in item for item in response.json()["detail"])
+
+
+async def test_valid_unicode_scalar_text_is_stored(client: AsyncClient) -> None:
+    response = await create_scan(
+        client,
+        {
+            "filename": "emoji.txt",
+            "text": "Valid emoji: 😀",
+            "analysis": None,
+            "ocr": None,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["text"] == "Valid emoji: 😀"
+
+
+async def test_null_character_in_text_returns_422(client: AsyncClient) -> None:
+    response = await create_scan(
+        client,
+        {
+            "filename": "null.txt",
+            "text": "\x00",
+            "analysis": None,
+            "ocr": None,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 async def test_configured_text_limit_returns_413(

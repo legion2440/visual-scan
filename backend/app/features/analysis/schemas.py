@@ -10,7 +10,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictStr,
-    ValidationInfo,
     field_validator,
 )
 
@@ -63,13 +62,10 @@ class StructuredField(BaseModel):
 
     @field_validator("label", "value")
     @classmethod
-    def normalize_nonempty_text(cls, value: str, info: ValidationInfo) -> str:
+    def normalize_nonempty_text(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError("Structured field values must not be empty.")
-        limit = 200 if info.field_name == "label" else 5_000
-        if len(normalized) > limit:
-            raise ValueError(f"Structured field {info.field_name} exceeds {limit} characters.")
         return normalized
 
 
@@ -112,8 +108,6 @@ class AnalysisData(BaseModel):
             tag = value.strip().lower()
             if not tag:
                 raise ValueError("Tags must not be empty.")
-            if len(tag) > 100:
-                raise ValueError("Tags must not exceed 100 characters.")
             if tag not in seen:
                 seen.add(tag)
                 normalized.append(tag)

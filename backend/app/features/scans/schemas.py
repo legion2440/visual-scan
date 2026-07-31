@@ -13,6 +13,7 @@ from pydantic import (
     Field,
     StrictInt,
     StrictStr,
+    ValidationInfo,
     field_validator,
 )
 
@@ -20,6 +21,7 @@ from app.features.analysis.schemas import (
     AnalysisData,
     Confidence,
     DocumentClassification,
+    StructuredField,
 )
 from app.features.ocr.schemas import OcrLanguage
 
@@ -54,10 +56,47 @@ OcrConfidence = Annotated[
 ]
 
 
+def _validate_utf8(value: str, *, field_name: str) -> str:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{field_name} must contain valid Unicode characters.") from error
+    return value
+
+
 class ScanAnalysisSnapshot(AnalysisData):
     """Complete immutable analysis metadata saved with a scan."""
 
     provider: StrictStr
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary_unicode(cls, value: str) -> str:
+        return _validate_utf8(value, field_name="Analysis summary")
+
+    @field_validator("tags")
+    @classmethod
+    def validate_stored_tags(cls, values: list[str]) -> list[str]:
+        for value in values:
+            _validate_utf8(value, field_name="Analysis tag")
+            if len(value) > 100:
+                raise ValueError("Analysis tags must not exceed 100 characters.")
+        return values
+
+    @field_validator("fields")
+    @classmethod
+    def validate_stored_fields(
+        cls,
+        values: list[StructuredField],
+    ) -> list[StructuredField]:
+        for field in values:
+            _validate_utf8(field.label, field_name="Structured field label")
+            _validate_utf8(field.value, field_name="Structured field value")
+            if len(field.label) > 200:
+                raise ValueError("Structured field labels must not exceed 200 characters.")
+            if len(field.value) > 5_000:
+                raise ValueError("Structured field values must not exceed 5000 characters.")
+        return values
 
     @field_validator("provider")
     @classmethod
@@ -67,7 +106,7 @@ class ScanAnalysisSnapshot(AnalysisData):
             raise ValueError("Analysis provider must not be empty.")
         if len(normalized) > 100:
             raise ValueError("Analysis provider exceeds 100 characters.")
-        return normalized
+        return _validate_utf8(normalized, field_name="Analysis provider")
 
 
 class ScanListAnalysisSnapshot(BaseModel):
@@ -102,7 +141,7 @@ class ScanOcrSnapshot(BaseModel):
             raise ValueError("OCR engine must not be empty.")
         if len(normalized) > 100:
             raise ValueError("OCR engine exceeds 100 characters.")
-        return normalized
+        return _validate_utf8(normalized, field_name="OCR engine")
 
     @field_validator("profile")
     @classmethod
@@ -114,7 +153,7 @@ class ScanOcrSnapshot(BaseModel):
             raise ValueError("OCR profile must not be empty.")
         if len(normalized) > 50:
             raise ValueError("OCR profile exceeds 50 characters.")
-        return normalized
+        return _validate_utf8(normalized, field_name="OCR profile")
 
 
 class ScanCreateRequest(BaseModel):
@@ -126,6 +165,15 @@ class ScanCreateRequest(BaseModel):
     text: StrictStr
     analysis: ScanAnalysisSnapshot | None = None
     ocr: ScanOcrSnapshot | None = None
+
+    @field_validator("filename", "text")
+    @classmethod
+    def validate_request_unicode(cls, value: str, info: ValidationInfo) -> str:
+        field_name = "Filename" if info.field_name == "filename" else "Scan text"
+        validated = _validate_utf8(value, field_name=field_name)
+        if info.field_name == "text" and "\x00" in validated:
+            raise ValueError("Scan text must not contain null characters.")
+        return validated
 
 
 class ScanDetail(BaseModel):

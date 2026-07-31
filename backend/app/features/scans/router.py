@@ -31,6 +31,7 @@ from app.features.scans.service import ScanService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scans", tags=["scans"])
+SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
 
 
 def get_scans_service(request: Request) -> ScanService:
@@ -78,7 +79,7 @@ async def create_scan(
 async def list_scans(
     service: Annotated[ScanService, Depends(get_scans_service)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=SQLITE_MAX_INTEGER)] = 0,
     q: Annotated[str | None, Query(max_length=200)] = None,
     classification: Annotated[
         ScanClassificationFilter | None,

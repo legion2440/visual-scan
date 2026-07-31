@@ -27,6 +27,9 @@ as health reporting can consist of only a router and its schemas.
 - Runtime settings injected by the factory are read from
   `request.app.state.settings`. Feature dependencies must not reload global
   settings and bypass an explicitly configured application instance.
+- Request validation errors are serialized without their submitted `input` or
+  validator context. This keeps malformed Unicode and sensitive document data
+  out of both unsafe response encoding and client-visible validation details.
 
 ## Layer responsibilities
 
@@ -151,9 +154,11 @@ JSON request
 ```
 
 - The service is the public feature entry point. It sanitizes filenames,
-  preserves non-empty text exactly, enforces the configured text limit,
-  generates UUID4 identifiers and UTC timestamps, and builds compact list
-  snippets. List responses omit full text and structured fields.
+  preserves accepted non-empty text exactly, enforces the configured text
+  limit, generates UUID4 identifiers and UTC timestamps, and builds compact
+  list snippets. Request contracts reject lone Unicode surrogates across all
+  persisted strings and embedded null characters in text. List responses omit
+  full text and structured fields.
 - The repository owns SQL, row mapping, connection configuration, and explicit
   transactions. Each operation opens and closes its own connection in the same
   worker thread; no connection is stored in application state.
@@ -169,11 +174,14 @@ JSON request
 - Search uses parameterized `instr(casefold(...), casefold(...))` expressions,
   so Unicode case folding is supported and SQL wildcard characters remain
   literal. Dynamic sort expressions and directions come only from fixed enum
-  mappings; `id ASC` is the final tie-breaker.
+  mappings; `id ASC` is the final tie-breaker. HTTP offsets are bounded by
+  SQLite's signed 64-bit integer range before repository binding.
 - Stored analysis reuses the analysis feature's public `AnalysisData`
-  contract, while stored OCR language values reuse the OCR feature's public
-  `OcrLanguage` contract. The scans feature does not import either feature's
-  service, pipeline, provider, or other implementation internals.
+  contract and adds archive-only metadata length limits. Those limits do not
+  change the version-one AI provider prompt or `ProviderAnalysisResult`.
+  Stored OCR language values reuse the OCR feature's public `OcrLanguage`
+  contract. The scans feature does not import either feature's service,
+  pipeline, provider, or other implementation internals.
 - SQLite stores text and analysis/OCR metadata only. Uploaded originals,
   rendered pages, and thumbnails are not accepted or persisted.
 

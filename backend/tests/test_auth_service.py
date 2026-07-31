@@ -134,7 +134,7 @@ def test_idle_absolute_expiry_and_touch_interval(tmp_path: Path) -> None:
 
     clock.value = START + timedelta(seconds=27)
     expired = service.resolve_session(outcome.session_token)
-    assert expired.session is None and expired.clear_cookie is True
+    assert expired.session is None
 
     second = service.login(credentials(), remote_address="two", current_session_token=None)
     clock.value += timedelta(seconds=101)

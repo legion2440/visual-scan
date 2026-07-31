@@ -340,10 +340,19 @@ display metadata, so changing OCR selectors cannot make server-derived text
 survive an identity switch.
 
 Generic protected 401 responses do not delete the session cookie: an old
-in-flight response must not erase a newer same-name cookie. Explicit logout
-and `GET /api/auth/session` still perform their documented cookie cleanup. The
-public authentication principal imported by OCR, analysis, and scans contains
-user identity only; session and CSRF digests stay inside the auth feature.
+in-flight response must not erase a newer same-name cookie. Session inspection
+is also read-only and never changes the cookie; only explicit logout sends the
+cookie-deletion header. The public authentication principal imported by OCR,
+analysis, and scans contains user identity only; session and CSRF digests stay
+inside the auth feature.
+
+Tabs synchronize successful login, registration, logout, and current-session
+401 changes through a versioned `BroadcastChannel`. Messages contain only the
+resulting public user ID or `null`, never a cookie or CSRF value. Receiving a
+signal, returning focus to the window, or making the document visible triggers
+a fresh `GET /api/auth/session`. Protected work is revision-invalidated before
+that check; a different user or anonymous result clears server-derived editor,
+AI, archive, detail, and legacy-claim state before the new archive is shown.
 
 The exact SQLite v1 archive is migrated to a separate `legacy_scans` table.
 Nothing is assigned automatically. The first registered user sees an explicit
@@ -456,6 +465,8 @@ pagination, reachability transitions, and best-effort export live in the pure
 reading, exporting, and explicitly clearing the legacy browser archive.
 `frontend/utils/auth.js` contains pure session normalization, Unicode-aware
 credential validation, identity/revision guards, and 401 transitions.
+`frontend/utils/authSync.js` owns credential-free cross-tab identity hints;
+`app.js` remains responsible for session revalidation and state cleanup.
 
 ## Input limits and errors
 
@@ -873,13 +884,14 @@ real AI server or API key. The test suite never requires the system Tesseract
 binary. Scans tests use only SQLite databases under pytest `tmp_path`, exercise
 the real application lifespan, and cover schema validation, WAL concurrency,
 transactions, Unicode search, deterministic pagination, and safe failures.
-Auth tests cover cookie attributes, stale protected 401 behavior,
+Auth tests cover cookie attributes, read-only session inspection, stale
+protected 401 behavior,
 Origin/CSRF enforcement, Argon2 hashing, dummy verification, atomic login
 rotation/rate-bucket cleanup, expiry/touch timing, HMAC rate limits, cross-user
 404 isolation, and atomic one-time legacy claim. Frontend tests also cover
-auth/CSRF generation guards and persistent editor provenance. The dependency
-graph check rejects undeclared cross-feature imports and stale generated
-output.
+auth/CSRF generation guards, cross-tab identity messages, graceful
+BroadcastChannel fallback, and persistent editor provenance. The dependency
+graph check rejects undeclared cross-feature imports and stale generated output.
 
 ## Structure
 
@@ -973,6 +985,7 @@ visual-scan/
 │   │   ├── ocr.js
 │   │   ├── api.js
 │   │   ├── auth.js
+│   │   ├── authSync.js
 │   │   ├── archive.js
 │   │   └── store.js
 │   ├── index.html
@@ -987,6 +1000,7 @@ visual-scan/
 │   ├── api.test.mjs
 │   ├── archive.test.mjs
 │   ├── auth.test.mjs
+│   ├── authSync.test.mjs
 │   ├── ocr.test.mjs
 │   └── store.test.mjs
 ├── public/
@@ -1022,6 +1036,7 @@ visual-scan/
 - `ocr.js` owns availability, the active Tesseract worker, and OCR progress.
 - `api.js` is the only backend HTTP transport module.
 - `auth.js` owns pure frontend auth validation and state-transition helpers.
+- `authSync.js` owns credential-free cross-tab identity-change hints.
 - `archive.js` owns pure OCR/archive mapping, freshness, pagination, and
   complete-export coordination.
 - `store.js` is a compatibility reader/export/clear adapter for legacy

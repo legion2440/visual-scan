@@ -89,10 +89,9 @@ async def login(
 @router.get("/session", response_model=SessionResponse)
 async def current_session(
     request: Request,
-    response: Response,
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> SessionResponse:
-    """Restore authenticated state or return an exact anonymous response."""
+    """Restore auth state without mutating a possibly newer browser cookie."""
     try:
         resolution = await run_in_threadpool(service.resolve_session, _current_cookie(request))
     except AuthError as error:
@@ -101,8 +100,6 @@ async def current_session(
         logger.error("Unexpected session lookup failure (%s)", type(error).__name__)
         raise HTTPException(status_code=500, detail=AuthError.default_message) from error
     if resolution.session is None:
-        if resolution.clear_cookie or resolution.inactive:
-            clear_session_cookie(response, request.app.state.settings)
         return SessionResponse.anonymous()
     return SessionResponse(
         authenticated=True,

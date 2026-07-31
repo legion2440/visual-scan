@@ -64,7 +64,6 @@ class SessionResolution:
 
     session: AuthenticatedSession | None
     csrf_token: str | None = None
-    clear_cookie: bool = False
     inactive: bool = False
 
 
@@ -189,21 +188,21 @@ class AuthService:
         token_hash = self._security.token_digest(session_token)
         session = self._repository.get_session(token_hash)
         if session is None:
-            return SessionResolution(session=None, clear_cookie=True)
+            return SessionResolution(session=None)
 
         now = self._now()
         if session.expires_at <= now or session.last_seen_at + self._idle_lifetime <= now:
             self._repository.delete_session(token_hash)
-            return SessionResolution(session=None, clear_cookie=True)
+            return SessionResolution(session=None)
         if not session.user.is_active:
-            return SessionResolution(session=None, clear_cookie=True, inactive=True)
+            return SessionResolution(session=None, inactive=True)
         if session.last_seen_at + self._touch_interval <= now:
             self._repository.touch_session(token_hash, now)
 
         csrf_token = self._security.csrf_token(session_token)
         if not self._security.verify_digest(csrf_token, session.csrf_hash):
             self._repository.delete_session(token_hash)
-            return SessionResolution(session=None, clear_cookie=True)
+            return SessionResolution(session=None)
         return SessionResolution(
             session=AuthenticatedSession(
                 principal=self._principal(session.user),

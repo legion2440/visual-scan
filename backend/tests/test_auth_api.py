@@ -123,7 +123,7 @@ async def test_login_rotates_presented_session_and_rejects_bad_credentials(
     anonymous_client.cookies.set("visual_scan_session", old_token, path="/api")
     stale = await anonymous_client.get("/api/auth/session")
     assert stale.json() == {"authenticated": False, "user": None, "csrf_token": None}
-    assert "Max-Age=0" in stale.headers["set-cookie"]
+    assert "set-cookie" not in stale.headers
 
 
 async def test_duplicate_username_is_case_insensitive(

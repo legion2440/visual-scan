@@ -58,6 +58,7 @@
         "users and password hashing",
         "internal opaque session and CSRF lifecycle",
         "minimal public authentication principal dependencies",
+        "read-only session identity inspection",
         "authentication rate limits"
       ],
       "depends_on": [

@@ -93,8 +93,9 @@ HTTP cookie + Origin/CSRF
   HMAC-SHA-256; raw addresses and usernames are not stored in rate buckets.
 - Generic protected 401 responses never emit a session-cookie deletion header:
   an old in-flight response must not delete a newer cookie with the same name
-  and path. The explicit session-inspection endpoint cleans invalid cookies,
-  and logout retains its exact revoke-and-delete contract.
+  and path. Session inspection is read-only and returns the exact anonymous
+  response for an invalid cookie without changing it. Only logout retains the
+  explicit revoke-and-delete contract.
 - The fixed SameSite=Lax topology requires frontend and backend to remain
   same-site. The default development pair is `localhost:5500` and
   `localhost:8000`; `127.0.0.1:5500` is intentionally not advertised as an
@@ -107,6 +108,15 @@ requests, while stale completions and 401 responses are ignored. The HTTP
 transport similarly versions its in-memory CSRF value. Editor provenance is
 independent of mutable OCR display metadata, so server-derived text is still
 removed after selectors invalidate the visible OCR snapshot.
+
+Because the HttpOnly cookie is shared across tabs while JavaScript state is
+not, successful auth changes publish only a public user-ID-or-null hint through
+a versioned `BroadcastChannel`. Every hint, window focus, and transition to a
+visible document revalidates `GET /api/auth/session`. The local auth revision is
+advanced before the request so in-flight protected responses cannot cross that
+boundary; a confirmed identity mismatch clears account-derived state before
+loading the replacement owner's archive. BroadcastChannel absence degrades to
+focus/visibility revalidation rather than disabling authentication.
 
 ## OCR request flow
 

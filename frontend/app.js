@@ -56,6 +56,7 @@ import {
   serverFeaturesAvailable,
   validatePassword,
 } from './utils/auth.js';
+import { createAuthSync } from './utils/authSync.js';
 
 const el = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -129,6 +130,11 @@ const state = {
   savedEditor: null,
 };
 
+const NO_IDENTITY_HINT = Symbol('no-identity-hint');
+let authSync = null;
+let authRevalidationTimer = null;
+let pendingIdentityHint = NO_IDENTITY_HINT;
+
 /* ── tabs and connection ─────────────────────────────────────────────── */
 
 function showPanel(name) {
@@ -170,6 +176,31 @@ function markBackendReachable() {
 
 function authenticated() {
   return serverFeaturesAvailable(state.auth);
+}
+
+function currentAuthUserId() {
+  return state.auth.status === 'authenticated' ? state.auth.user?.id || null : null;
+}
+
+function publishAuthIdentity() {
+  authSync?.publish(currentAuthUserId());
+}
+
+function scheduleAuthRevalidation(identityHint = NO_IDENTITY_HINT) {
+  if (identityHint !== NO_IDENTITY_HINT) pendingIdentityHint = identityHint;
+  if (authRevalidationTimer !== null) return;
+  authRevalidationTimer = setTimeout(runScheduledAuthRevalidation, 0);
+}
+
+async function runScheduledAuthRevalidation() {
+  authRevalidationTimer = null;
+  if (state.auth.busy) {
+    authRevalidationTimer = setTimeout(runScheduledAuthRevalidation, 100);
+    return;
+  }
+  const identityHint = pendingIdentityHint;
+  pendingIdentityHint = NO_IDENTITY_HINT;
+  await restoreAuthSession({ revalidation: true, identityHint });
 }
 
 function beginProtectedRequest() {
@@ -308,6 +339,7 @@ function handleProtectedApiError(error, requestAuth) {
   applyApiReachability(error);
   if (error instanceof ApiError && error.status === 401) {
     becomeAnonymous('Your session ended. Sign in again to use server features.');
+    publishAuthIdentity();
     return true;
   }
   return false;
@@ -1512,11 +1544,13 @@ $$('.sortable').forEach((heading) => {
 function renderArchive() {
   const archive = state.archive;
   const signedIn = authenticated();
-  const first = archive.total ? archive.offset + 1 : 0;
-  const last = Math.min(archive.offset + archive.items.length, archive.total);
-  el('tab-count').textContent = archive.total;
+  const visibleItems = signedIn ? archive.items : [];
+  const visibleTotal = signedIn ? archive.total : 0;
+  const first = visibleTotal ? archive.offset + 1 : 0;
+  const last = Math.min(archive.offset + visibleItems.length, visibleTotal);
+  el('tab-count').textContent = visibleTotal;
   el('results-count').textContent =
-    `${first}–${last} of ${archive.total} document${archive.total === 1 ? '' : 's'}`;
+    `${first}–${last} of ${visibleTotal} document${visibleTotal === 1 ? '' : 's'}`;
   el('results-status').textContent = !signedIn
     ? 'Sign in to load the server archive.'
     : archive.busy
@@ -1537,14 +1571,14 @@ function renderArchive() {
     || archive.busy
     || archive.exportBusy
     || archive.offset + archive.items.length >= archive.total;
-  const pages = Math.max(1, Math.ceil(archive.total / archive.limit));
+  const pages = Math.max(1, Math.ceil(visibleTotal / archive.limit));
   const page = Math.min(pages, Math.floor(archive.offset / archive.limit) + 1);
   el('page-label').textContent = `Page ${page} of ${pages}`;
   $$('.sortable').forEach((heading) => {
     heading.dataset.dir = heading.dataset.key === archive.sort ? archive.order : '';
   });
 
-  el('results-body').innerHTML = archive.items.map((scan) => {
+  el('results-body').innerHTML = visibleItems.map((scan) => {
     const analysis = scan.analysis;
     const ocr = scan.ocr;
     const classification = analysis?.classification || 'unclassified';
@@ -1922,6 +1956,7 @@ el('auth-form').addEventListener('submit', async (event) => {
     const session = normalizeAuthSession(response);
     markBackendReachable();
     applyAuthenticatedSession(session);
+    publishAuthIdentity();
     state.auth.controller = null;
     el('auth-dialog').hidden = true;
     el('auth-password').value = '';
@@ -1946,14 +1981,23 @@ el('auth-form').addEventListener('submit', async (event) => {
   }
 });
 
-async function restoreAuthSession() {
+async function restoreAuthSession({
+  revalidation = false,
+  identityHint = NO_IDENTITY_HINT,
+} = {}) {
+  const previousUser = state.auth.user;
+  const previousUserId = previousUser?.id || null;
+  const clearForHint = identityHint !== NO_IDENTITY_HINT
+    && previousUserId !== identityHint;
   state.auth.revision += 1;
   const revision = state.auth.revision;
   state.auth.controller?.abort();
+  if (revalidation) cancelAuthBoundRequests();
   const controller = new AbortController();
   state.auth.controller = controller;
   state.auth.status = 'checking';
   state.auth.busy = true;
+  if (clearForHint) clearServerDerivedState();
   paintAuthState();
   try {
     const response = await api.authSession({ signal: controller.signal });
@@ -1961,14 +2005,18 @@ async function restoreAuthSession() {
     markBackendReachable();
     const session = normalizeAuthSession(response);
     if (session.status === 'authenticated') {
+      const changedIdentity = identityChanged(previousUser, session.user);
       applyAuthenticatedSession(session);
-      await loadArchive({ clearCache: true, quiet: true });
-      await loadServerLegacyStatus();
+      if (!revalidation || changedIdentity || clearForHint) {
+        await loadArchive({ clearCache: true, quiet: true });
+        await loadServerLegacyStatus();
+      }
     } else {
       api.clearCsrfToken();
       state.auth.status = 'anonymous';
       state.auth.user = null;
       state.auth.csrfToken = null;
+      clearServerDerivedState();
     }
   } catch (error) {
     if (!isAuthRevisionCurrent(state.auth, revision) || error?.kind === 'cancelled') return;
@@ -1977,6 +2025,7 @@ async function restoreAuthSession() {
     state.auth.status = 'anonymous';
     state.auth.user = null;
     state.auth.csrfToken = null;
+    clearServerDerivedState();
   } finally {
     if (isAuthRevisionCurrent(state.auth, revision)) {
       state.auth.busy = false;
@@ -2010,6 +2059,7 @@ el('btn-logout').addEventListener('click', async () => {
     if (!isAuthRevisionCurrent(state.auth, revision)) return;
     markBackendReachable();
     becomeAnonymous();
+    publishAuthIdentity();
     notice('Signed out. Browser OCR and manual text remain available.', 'ok');
   } catch (error) {
     if (!isAuthRevisionCurrent(state.auth, revision) || error?.kind === 'cancelled') return;
@@ -2182,7 +2232,18 @@ el('dateline-date').textContent = new Date().toLocaleDateString(undefined, {
   year: 'numeric',
 });
 
+authSync = createAuthSync(({ userId }) => {
+  scheduleAuthRevalidation(userId);
+});
+
+window.addEventListener('focus', () => scheduleAuthRevalidation());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') scheduleAuthRevalidation();
+});
+
 window.addEventListener('beforeunload', () => {
+  clearTimeout(authRevalidationTimer);
+  authSync?.close();
   state.ocrController?.abort();
   state.aiController?.abort();
   state.archive.controller?.abort();

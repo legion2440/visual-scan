@@ -5,6 +5,27 @@
     "factory": "backend/app/factory.py",
     "api_router": "backend/app/api/router.py"
   },
+  "infrastructure": {
+    "storage": {
+      "entrypoint": "backend/app/storage/database.py",
+      "contracts": [
+        "backend/app/storage/errors.py"
+      ],
+      "implementation": [
+        "backend/app/storage/schema.py"
+      ],
+      "owns": [
+        "SQLite connection policy",
+        "WAL and transaction lifecycle",
+        "schema versions and migrations"
+      ],
+      "depends_on": [],
+      "tests": [
+        "backend/tests/test_database_schema_v2.py",
+        "backend/tests/test_sqlite_scan_repository.py"
+      ]
+    }
+  },
   "features": {
     "health": {
       "entrypoint": "backend/app/features/health/router.py",
@@ -19,6 +40,35 @@
       ],
       "tests": [
         "backend/tests/test_health.py"
+      ]
+    },
+    "auth": {
+      "entrypoint": "backend/app/features/auth/router.py",
+      "contracts": [
+        "backend/app/features/auth/schemas.py",
+        "backend/app/features/auth/dependencies.py"
+      ],
+      "implementation": [
+        "backend/app/features/auth/service.py",
+        "backend/app/features/auth/repository.py",
+        "backend/app/features/auth/security.py",
+        "backend/app/features/auth/errors.py"
+      ],
+      "owns": [
+        "users and password hashing",
+        "opaque sessions and CSRF",
+        "authentication dependencies",
+        "authentication rate limits"
+      ],
+      "depends_on": [
+        "backend/app/core/config.py",
+        "backend/app/storage/database.py",
+        "backend/app/storage/errors.py"
+      ],
+      "tests": [
+        "backend/tests/test_auth_api.py",
+        "backend/tests/test_auth_service.py",
+        "backend/tests/test_sqlite_auth_repository.py"
       ]
     },
     "ocr": {
@@ -42,7 +92,9 @@
         "Tesseract OCR"
       ],
       "depends_on": [
-        "backend/app/core/config.py"
+        "backend/app/core/config.py",
+        "backend/app/features/auth/dependencies.py",
+        "backend/app/features/auth/schemas.py"
       ],
       "tests": [
         "backend/tests/test_ocr_api.py",
@@ -72,7 +124,9 @@
         "OpenAI-compatible provider integration"
       ],
       "depends_on": [
-        "backend/app/core/config.py"
+        "backend/app/core/config.py",
+        "backend/app/features/auth/dependencies.py",
+        "backend/app/features/auth/schemas.py"
       ],
       "tests": [
         "backend/tests/test_analysis_api.py",
@@ -88,23 +142,26 @@
       "implementation": [
         "backend/app/features/scans/service.py",
         "backend/app/features/scans/repository.py",
-        "backend/app/features/scans/schema.py",
         "backend/app/features/scans/errors.py"
       ],
       "owns": [
-        "server-side scan archive",
-        "SQLite scan persistence",
+        "owner-scoped server scan archive",
+        "legacy pre-auth scan claim",
         "scan search, filtering, sorting, and pagination"
       ],
       "depends_on": [
         "backend/app/core/config.py",
+        "backend/app/storage/database.py",
+        "backend/app/features/auth/dependencies.py",
+        "backend/app/features/auth/schemas.py",
         "backend/app/features/analysis/schemas.py",
         "backend/app/features/ocr/schemas.py"
       ],
       "tests": [
         "backend/tests/test_scans_api.py",
         "backend/tests/test_scans_service.py",
-        "backend/tests/test_sqlite_scan_repository.py"
+        "backend/tests/test_sqlite_scan_repository.py",
+        "backend/tests/test_scan_ownership.py"
       ]
     }
   }

@@ -48,6 +48,12 @@ def test_settings(tmp_path: Path) -> Settings:
         scans_database_path=tmp_path / "data" / "visual-scan.db",
         scans_database_busy_timeout_ms=5_000,
         scans_max_text_chars=250_000,
+        auth_cookie_name="visual_scan_session",
+        auth_cookie_secure=False,
+        auth_absolute_lifetime_seconds=604_800,
+        auth_idle_lifetime_seconds=86_400,
+        auth_touch_interval_seconds=300,
+        auth_hmac_secret="test-auth-hmac-secret-with-at-least-32-bytes",
     )
 
 
@@ -64,9 +70,32 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
-    """Yield an HTTPX client connected directly to the ASGI application."""
+async def anonymous_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+    """Yield an anonymous HTTPX client connected directly to the app."""
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            headers={"Origin": "http://localhost:5500"},
+        ) as test_client:
+            yield test_client
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+    """Yield a registered client with cookie and CSRF transport state."""
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            headers={"Origin": "http://localhost:5500"},
+        ) as test_client:
+            response = await test_client.post(
+                "/api/auth/register",
+                json={"username": "test-user", "password": "correct horse battery staple"},
+            )
+            assert response.status_code == 201
+            test_client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
             yield test_client

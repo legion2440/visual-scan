@@ -12,6 +12,7 @@ frontend/assets/tessdata/manifest.json
 
 # Python environments, caches, and local settings
 backend/.env
+.visual-scan-cookies.txt
 .venv/
 venv/
 __pycache__/

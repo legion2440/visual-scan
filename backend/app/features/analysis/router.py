@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 
 from app.core.config import Settings
 from app.features.analysis.errors import (
@@ -17,6 +18,8 @@ from app.features.analysis.pipeline import AnalysisPipeline
 from app.features.analysis.provider import OpenAICompatibleProvider
 from app.features.analysis.schemas import AnalysisRequest, AnalysisResponse
 from app.features.analysis.service import AnalysisService
+from app.features.auth.dependencies import require_csrf_principal
+from app.features.auth.schemas import AuthenticatedPrincipal
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ai", tags=["analysis"])
@@ -79,7 +82,11 @@ async def shutdown_analysis_service(application: FastAPI) -> None:
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
-async def analyze_document(request: Request, payload: AnalysisRequest) -> AnalysisResponse:
+async def analyze_document(
+    request: Request,
+    payload: AnalysisRequest,
+    _principal: Annotated[AuthenticatedPrincipal, Depends(require_csrf_principal)],
+) -> AnalysisResponse:
     """Classify and summarize OCR text through the configured provider."""
     try:
         service = await get_analysis_service(request)

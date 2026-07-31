@@ -15,12 +15,13 @@ as health reporting can consist of only a router and its schemas.
 - `app/factory.py` exposes the side-effect-free `create_app()` factory. Tests
   import this module and inject explicit settings without constructing the
   production application or reading `backend/.env`.
-- The factory installs the application lifespan. Startup creates the app-local
-  analysis initialization lock, constructs the resource-free scans service,
-  and bootstraps its SQLite schema in Starlette's thread pool. Shutdown closes
-  a lazily created analysis service and its HTTP client. No provider
-  connection or database file is created during application construction or
-  health reporting.
+- The factory installs the application lifespan. Startup creates one
+  lightweight app-local `SQLiteDatabase`, auth service, scans service, and the
+  analysis initialization lock. A single shared schema bootstrap runs in
+  Starlette's thread pool before requests are accepted. Shutdown closes a
+  lazily created analysis service and its HTTP client. No provider connection
+  or database file is created during application construction or health
+  reporting.
 - `app/main.py` is the production ASGI entry point. It imports the factory and
   creates `app` for Uvicorn.
 - `app/api/router.py` composes public feature routers.
@@ -48,10 +49,46 @@ as health reporting can consist of only a router and its schemas.
 - Features must not import another feature's internal modules.
 - Cross-feature collaboration must use a documented public entry point or
   shared contract.
+- `auth/dependencies.py` and auth principal schemas are the public security
+  boundary used by feature routers. Other features do not import auth service,
+  repository, security, or error internals.
+- `app/storage` is shared infrastructure, not an HTTP feature. It owns SQLite
+  lifecycle and schema migration; feature repositories own only their SQL.
 - Routers must not contain provider, persistence, or multi-step orchestration
   logic.
 - Pipelines coordinate; providers and repositories perform boundary work.
 - New or moved features must be reflected in `backend/module-map.json`.
+
+## Authentication request flow
+
+```text
+HTTP cookie + Origin/CSRF
+  → auth dependency/router
+  → synchronous auth service in Starlette thread pool
+  → password/token security adapter + auth repository
+  → shared SQLiteDatabase
+```
+
+- Authentication uses opaque server-side sessions. The browser receives a
+  random token only in an HttpOnly, SameSite=Lax cookie; SQLite stores a
+  32-byte SHA-256 digest. Login and registration rotate only the session
+  presented by that browser, while logout revokes only the current session.
+- A stable CSRF token is derived with a domain-separated HMAC from the raw
+  session token, returned by the session endpoint, and held only in frontend
+  memory. SQLite stores only its digest. This lets reload and multiple tabs
+  recover the same CSRF value without persisting raw CSRF material.
+- Unsafe requests require an exact configured Origin. Authenticated mutations
+  additionally require `X-CSRF-Token`; preflight OPTIONS is handled by CORS
+  middleware before route dependencies.
+- Password hashing and verification use pwdlib Argon2 in the thread pool. A
+  fixed valid dummy Argon2 hash keeps unknown-user verification on the same
+  expensive path without heavy import-time or per-request hash generation.
+- Session absolute expiry, idle expiry, and bounded touch writes are enforced
+  against UTC timestamps. Username/IP rate-limit keys use domain-separated
+  HMAC-SHA-256; raw addresses and usernames are not stored in rate buckets.
+- The fixed SameSite=Lax topology requires frontend and backend to remain
+  same-site. Production HTTPS enables the Secure cookie setting. Trusted proxy
+  address processing and cross-site cookies are outside this version.
 
 ## OCR request flow
 
@@ -143,14 +180,15 @@ JSON request
 
 ## Scans request flow
 
-The scans feature stores immutable OCR results and metadata independently from
-the browser archive:
+The scans feature stores immutable OCR results and metadata per authenticated
+owner, independently from the browser archive:
 
 ```text
 JSON request
   → scans router
   → synchronous scans service in Starlette thread pool
-  → SQLite repository
+  → owner-scoped SQLite repository
+  → shared SQLiteDatabase
 ```
 
 - The service is the public feature entry point. It sanitizes filenames,
@@ -159,18 +197,22 @@ JSON request
   list snippets. Request contracts reject lone Unicode surrogates across all
   persisted strings and embedded null characters in text. List responses omit
   full text and structured fields.
-- The repository owns SQL, row mapping, connection configuration, and explicit
-  transactions. Each operation opens and closes its own connection in the same
-  worker thread; no connection is stored in application state.
+- The repository owns owner-filtered SQL and row mapping. Every create, get,
+  list, delete, clear, search, total, and export query receives the authenticated
+  user ID; cross-owner identifiers are indistinguishable from missing records.
+- Shared storage owns connection configuration and explicit transactions.
+  Each operation opens and closes its own connection in the same worker thread;
+  no process-wide connection is stored in application state.
 - Every connection uses `isolation_level=None`, foreign keys, a bounded busy
   timeout, `synchronous=FULL`, and a deterministic Unicode `casefold()`
   function. Writes use `BEGIN IMMEDIATE`; list count and page queries share one
   read transaction and therefore one snapshot.
 - Startup creates the configured parent directory, enables and verifies WAL
   outside a transaction, runs `PRAGMA quick_check`, then creates or validates
-  schema version 1. A version-zero database is adopted only when the `scans`
-  table is absent. Unknown versions, malformed tables or indexes, corruption,
-  a directory path, and unavailable storage prevent startup.
+  schema version 2. The exact version-one global scans schema is migrated under
+  `BEGIN IMMEDIATE`: old rows move unchanged to `legacy_scans`, while new scans
+  require a user owner. Only the initial user may explicitly and atomically
+  claim those rows. There is no silent assignment or deletion.
 - Search uses parameterized `instr(casefold(...), casefold(...))` expressions,
   so Unicode case folding is supported and SQL wildcard characters remain
   literal. Dynamic sort expressions and directions come only from fixed enum
@@ -185,7 +227,6 @@ JSON request
 - SQLite stores text and analysis/OCR metadata only. Uploaded originals,
   rendered pages, and thumbnails are not accepted or persisted.
 
-The module map is the navigation source for agents and maintainers. A
-dependency graph generator is deferred until authentication becomes a second
-consumer of SQLite; before that point it would duplicate the module map
-without adding useful navigation.
+The module map is the navigation source for agents and maintainers. Run
+`python backend/scripts/generate_dependency_graph.py --check` to validate
+declared imports and ensure `backend/DEPENDENCY_GRAPH.md` is current.

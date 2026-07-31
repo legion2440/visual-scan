@@ -8,6 +8,21 @@
 
 import { CONFIG } from '../config.js';
 
+let csrfToken = null;
+
+function csrfExempt(path) {
+  return path === '/api/auth/register' || path === '/api/auth/login';
+}
+
+function requestHeaders(path, method, body) {
+  const headers = {};
+  if (body != null && !(body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !csrfExempt(path) && csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  return Object.keys(headers).length ? headers : undefined;
+}
+
 export class ApiError extends Error {
   constructor(message, { status = 0, kind = 'network', cause } = {}) {
     super(message);
@@ -100,12 +115,14 @@ export async function request(path, {
   try {
     const response = await fetch(buildUrl(path, query), {
       method,
+      credentials: 'include',
       signal: controller.signal,
-      headers: body != null && !isFormData ? { 'Content-Type': 'application/json' } : undefined,
+      headers: requestHeaders(path, method, body),
       body: serializedBody,
     });
     const payload = await readPayload(response);
     if (!response.ok) {
+      if (response.status === 401) csrfToken = null;
       throw new ApiError(responseErrorMessage(payload, method, path, response.status), {
         status: response.status,
         kind: 'http',
@@ -155,6 +172,33 @@ function pdfForm(file, { language, preprocessing, threshold, password }) {
 }
 
 export const api = Object.freeze({
+  setCsrfToken: (value) => {
+    csrfToken = typeof value === 'string' && value ? value : null;
+  },
+  clearCsrfToken: () => {
+    csrfToken = null;
+  },
+  authSession: ({ signal } = {}) => request('/api/auth/session', {
+    timeoutMs: CONFIG.archiveTimeoutMs,
+    signal,
+  }),
+  register: (payload, { signal } = {}) => request('/api/auth/register', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: CONFIG.archiveTimeoutMs,
+    signal,
+  }),
+  login: (payload, { signal } = {}) => request('/api/auth/login', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: CONFIG.archiveTimeoutMs,
+    signal,
+  }),
+  logout: ({ signal } = {}) => request('/api/auth/logout', {
+    method: 'POST',
+    timeoutMs: CONFIG.archiveTimeoutMs,
+    signal,
+  }),
   health: ({ signal } = {}) => request('/api/health', {
     timeoutMs: CONFIG.healthTimeoutMs,
     signal,
@@ -199,6 +243,15 @@ export const api = Object.freeze({
   }),
   clearScans: ({ signal } = {}) => request('/api/scans', {
     method: 'DELETE',
+    timeoutMs: CONFIG.archiveTimeoutMs,
+    signal,
+  }),
+  legacyScans: ({ signal } = {}) => request('/api/scans/legacy', {
+    timeoutMs: CONFIG.archiveTimeoutMs,
+    signal,
+  }),
+  claimLegacyScans: ({ signal } = {}) => request('/api/scans/legacy/claim', {
+    method: 'POST',
     timeoutMs: CONFIG.archiveTimeoutMs,
     signal,
   }),

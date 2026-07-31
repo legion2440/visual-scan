@@ -9,8 +9,9 @@ The backend reports health and provides independent server-side OCR with
 in-memory Pillow preprocessing, PDFium rendering, and the system Tesseract
 executable. It also provides optional AI document classification, summaries,
 tags, and structured fields through a configured OpenAI-compatible provider.
-It also exposes a SQLite-backed API for saving scan text and analysis/OCR
-metadata. Authentication and Docker are not implemented yet.
+It also exposes a session-authenticated, owner-scoped SQLite archive for scan
+text and analysis/OCR metadata. Browser OCR remains available anonymously.
+Docker is not implemented yet.
 
 ## Features
 
@@ -31,16 +32,20 @@ metadata. Authentication and Docker are not implemented yet.
 - Server preprocessing modes: none, grayscale, and binary threshold.
 - SQLite scans API with search, filtering, deterministic sorting, pagination,
   detail retrieval, deletion, and archive cleanup.
+- Registration, login, session restore, logout, CSRF protection, and
+  per-user scan ownership through opaque HttpOnly-cookie sessions.
 - SQLite results archive with sorting, search, fixed classification filtering,
   pagination, async detail view, deletion, cleanup, and complete JSON export.
 - Explicit export or deletion of legacy `localStorage` results without
   automatic migration.
 - Two views: **Upload & Scan** and **Scanned Results**.
 
-New records are saved only through `POST /api/scans`; the frontend never stores
+New records are saved only through authenticated `POST /api/scans`; the frontend never stores
 new thumbnails or scan records in `localStorage`. Records left by older
 versions appear in a separate compatibility banner. They are never mixed with
-server results, migrated, or deleted without an explicit action.
+server results, migrated, or deleted without an explicit action. Records from
+the pre-auth SQLite schema are separately claimable only by the first
+registered user.
 
 ## Browser OCR and server OCR
 
@@ -50,7 +55,7 @@ server results, migrated, or deleted without an explicit action.
 | Input | Current processed Canvas | Processed Canvas PNG, or original PDF |
 | Preprocessing | Interactive Canvas controls | Image: already processed; PDF: none, grayscale, or threshold |
 | Models | Local frontend `traineddata` profiles | Languages installed with system Tesseract |
-| Backend required | No | Yes |
+| Backend and sign-in required | No | Yes |
 
 For an image, switching engines keeps the same language selection. Browser
 mode also exposes the local model profile; server mode does not claim or infer
@@ -257,6 +262,7 @@ settings cover:
 - optional OpenAI-compatible AI endpoint, model, API key, provider label,
   response mode, deadline, and input/output limits;
 - SQLite archive path, bounded busy timeout, and maximum stored text length.
+- auth cookie name/Secure flag, session lifetimes, and the server HMAC secret.
 
 `VISUAL_SCAN_CORS_ORIGINS` is a JSON array:
 
@@ -284,10 +290,69 @@ VISUAL_SCAN_AI_RESPONSE_FORMAT=json_object
 VISUAL_SCAN_SCANS_DATABASE_PATH=data/visual-scan.db
 VISUAL_SCAN_SCANS_DATABASE_BUSY_TIMEOUT_MS=5000
 VISUAL_SCAN_SCANS_MAX_TEXT_CHARS=250000
+VISUAL_SCAN_AUTH_COOKIE_NAME=visual_scan_session
+VISUAL_SCAN_AUTH_COOKIE_SECURE=false
+VISUAL_SCAN_AUTH_ABSOLUTE_LIFETIME_SECONDS=604800
+VISUAL_SCAN_AUTH_IDLE_LIFETIME_SECONDS=86400
+VISUAL_SCAN_AUTH_TOUCH_INTERVAL_SECONDS=300
+VISUAL_SCAN_AUTH_HMAC_SECRET=replace-with-at-least-32-random-bytes
 ```
 
 The default allowed frontend origins are `http://localhost:5500` and
 `http://127.0.0.1:5500`.
+
+Origins must be canonical scheme/host/port values without paths, credentials,
+queries, fragments, or wildcards. Production environments must replace the
+development HMAC secret with at least 32 random bytes and set
+`VISUAL_SCAN_AUTH_COOKIE_SECURE=true` under HTTPS.
+
+## Authentication and ownership
+
+Visual Scan uses opaque server-side sessions rather than JWTs. Registration
+and login set a random session token in an HttpOnly, SameSite=Lax cookie scoped
+to the API prefix. SQLite stores only its SHA-256 digest. Session state has a
+seven-day absolute lifetime, a 24-hour idle lifetime, and a five-minute touch
+interval by default.
+
+The frontend restores authentication with `GET /api/auth/session`. The
+response contains a CSRF token held only in JavaScript memory; it is never
+written to localStorage, sessionStorage, a URL, or a JSON archive. Every
+authenticated mutation sends it in `X-CSRF-Token`. All requests use
+`credentials: include`, and every unsafe request must have an exact allowed
+Origin.
+
+SameSite=Lax assumes frontend and backend are same-site. The documented local
+topology is `http://localhost:5500` with `http://localhost:8000`; do not mix
+`localhost` and `127.0.0.1` within one browser session. Cross-site deployment,
+trusted proxy forwarding, password reset/change, email verification, MFA,
+OAuth, account deletion, and session/device management are not implemented.
+
+Server image/PDF OCR, AI analysis, and every scans endpoint require sign-in.
+Browser OCR, image editing, camera capture, and export/deletion of old browser
+localStorage records remain available anonymously. Logout or a 401 clears
+account-derived archive/detail/AI/server-OCR state while preserving
+browser/manual editor data.
+
+The exact SQLite v1 archive is migrated to a separate `legacy_scans` table.
+Nothing is assigned automatically. The first registered user sees an explicit
+claim action that copies all old records into their owned archive and removes
+the legacy rows in one transaction. Other users receive 403 without record
+contents.
+
+Registration and login endpoints are:
+
+```http
+POST /api/auth/register
+POST /api/auth/login
+GET  /api/auth/session
+POST /api/auth/logout
+```
+
+Usernames normalize to lowercase ASCII and allow 3–32 letters, numbers, dots,
+underscores, and hyphens. Passwords are preserved exactly, contain 12–256
+Unicode code points, and are hashed with Argon2. Unknown users still execute a
+fixed dummy Argon2 verification. SQLite-backed login and registration limits
+use HMAC-SHA-256 keys rather than storing raw usernames or remote addresses.
 
 ## AI document analysis
 
@@ -359,6 +424,10 @@ request is implemented in `frontend/utils/api.js`. Operation deadlines are:
 The transport distinguishes HTTP, network, timeout, and caller-cancelled
 errors. Any HTTP response proves reachability. Network failures and timeouts
 mark the backend unavailable; superseded requests do not alter the indicator.
+The same transport owns the in-memory CSRF value, adds it only to unsafe
+authenticated requests, sends credentials for every request, and clears CSRF
+immediately on HTTP 401. Application auth/archive/editor state remains in
+`app.js`; the transport never stores it.
 
 The environment-neutral OCR registry lives in `frontend/ocrProfiles.js`.
 Browser code and both Node.js setup scripts import it, so profile identifiers,
@@ -372,6 +441,8 @@ Archive mapping, exact AI-result freshness, storage snapshot limits,
 pagination, reachability transitions, and best-effort export live in the pure
 `frontend/utils/archive.js` module. `frontend/utils/store.js` is limited to
 reading, exporting, and explicitly clearing the legacy browser archive.
+`frontend/utils/auth.js` contains pure session normalization, Unicode-aware
+credential validation, identity/revision guards, and 401 transitions.
 
 ## Input limits and errors
 
@@ -385,6 +456,8 @@ The interface reports unsupported formats, oversized or invalid images,
 camera errors, OCR failures, missing model combinations, and an unavailable
 backend. Backend availability does not affect upload, camera capture, Canvas
 preprocessing, browser OCR, editing text, or exporting legacy records.
+Anonymous users see explicit sign-in gates for server OCR, PDF OCR, AI, save,
+and the owner-scoped server archive.
 
 The backend indicator reports network reachability only. A received HTTP error
 still means the backend is reachable; only a network failure or timeout marks
@@ -490,6 +563,21 @@ label without making an external request:
 }
 ```
 
+All OCR, AI, and scans examples below require a session. Register once while
+preserving the cookie jar, then copy `csrf_token` from the JSON response:
+
+```bash
+curl -c .visual-scan-cookies.txt -X POST http://localhost:8000/api/auth/register \
+  -H "Origin: http://localhost:5500" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"nazar","password":"correct horse battery staple"}'
+
+CSRF=replace-with-csrf-token-from-response
+```
+
+Unsafe requests use both the cookie and CSRF header. Authenticated GET requests
+need only the cookie. Browser JavaScript cannot read the HttpOnly session token.
+
 AI document analysis:
 
 ```http
@@ -501,6 +589,9 @@ Example:
 
 ```bash
 curl -X POST http://localhost:8000/api/ai/analyze \
+  -b .visual-scan-cookies.txt \
+  -H "Origin: http://localhost:5500" \
+  -H "X-CSRF-Token: $CSRF" \
   -H "Content-Type: application/json" \
   -d '{"filename":"contract.jpg","text":"Recognized document text...","language":"eng"}'
 ```
@@ -541,6 +632,9 @@ Example:
 
 ```bash
 curl -i -X POST http://localhost:8000/api/scans \
+  -b .visual-scan-cookies.txt \
+  -H "Origin: http://localhost:5500" \
+  -H "X-CSRF-Token: $CSRF" \
   -H "Content-Type: application/json" \
   -d '{"filename":"contract.jpg","text":"Full edited OCR text.","analysis":null,"ocr":null}'
 ```
@@ -579,6 +673,8 @@ GET /api/scans
 GET /api/scans/{scan_id}
 DELETE /api/scans/{scan_id}
 DELETE /api/scans
+GET /api/scans/legacy
+POST /api/scans/legacy/claim
 ```
 
 List parameters are `limit` (1–200, default 50), `offset` (0 through
@@ -589,14 +685,19 @@ server-calculated snippet but omit full text and structured fields; the detail
 endpoint returns both. Deleting an unknown identifier returns 404, while
 clearing the archive returns `{"deleted": <count>}`.
 
-The default database is `backend/data/visual-scan.db`. Relative paths are
+Every archive operation is scoped to the authenticated owner. A known UUID
+owned by another account returns the same 404 as a missing UUID, and clear
+deletes only the current user's records. `GET /api/scans/legacy` and the CSRF-
+protected claim endpoint are available only to the initial user.
+
+The default database is `backend/data/visual-scan.db`. The existing
+`VISUAL_SCAN_SCANS_DATABASE_PATH` setting is intentionally preserved. Relative paths are
 resolved from `backend/`; absolute deployment paths are allowed. Startup
 creates the parent directory, enables WAL with `synchronous=FULL`, runs an
-integrity check, and strictly validates schema version 1 and its indexes.
+integrity check, and strictly creates, migrates, or validates schema version 2,
+including tables, SQL definitions, indexes, and foreign keys. Version 1 is
+migrated transactionally into the explicit pre-auth archive.
 SQLite stores only result text and metadata—never originals or thumbnails.
-The archive endpoints are unauthenticated in this step, so the default backend
-binding remains `127.0.0.1`; public deployment is unsupported until
-authentication is added.
 
 Server-side OCR:
 
@@ -618,6 +719,9 @@ Example:
 
 ```bash
 curl -X POST http://localhost:8000/api/ocr/recognize \
+  -b .visual-scan-cookies.txt \
+  -H "Origin: http://localhost:5500" \
+  -H "X-CSRF-Token: $CSRF" \
   -F "file=@public/sample-docs/invoice.jpg;type=image/jpeg" \
   -F "language=eng" \
   -F "preprocessing=grayscale"
@@ -660,6 +764,9 @@ Example:
 
 ```bash
 curl -X POST http://localhost:8000/api/ocr/pdf/recognize \
+  -b .visual-scan-cookies.txt \
+  -H "Origin: http://localhost:5500" \
+  -H "X-CSRF-Token: $CSRF" \
   -F "file=@document.pdf;type=application/pdf" \
   -F "language=eng+rus" \
   -F "preprocessing=grayscale"
@@ -738,6 +845,7 @@ python -m pytest backend/tests
 python -m ruff check backend
 python -m ruff format --check backend
 python -m compileall backend/app backend/tests
+python backend/scripts/generate_dependency_graph.py --check
 npm test
 ```
 
@@ -752,6 +860,11 @@ real AI server or API key. The test suite never requires the system Tesseract
 binary. Scans tests use only SQLite databases under pytest `tmp_path`, exercise
 the real application lifespan, and cover schema validation, WAL concurrency,
 transactions, Unicode search, deterministic pagination, and safe failures.
+Auth tests cover cookie attributes, Origin/CSRF enforcement, Argon2 hashing,
+dummy verification, token rotation, expiry/touch timing, HMAC rate limits,
+cross-user 404 isolation, and atomic one-time legacy claim. The dependency
+graph check also rejects undeclared cross-feature imports and stale generated
+output.
 
 ## Structure
 
@@ -773,6 +886,14 @@ visual-scan/
 │   │   │   │   ├── provider.py
 │   │   │   │   ├── prompts.py
 │   │   │   │   └── errors.py
+│   │   │   ├── auth/
+│   │   │   │   ├── router.py
+│   │   │   │   ├── schemas.py
+│   │   │   │   ├── dependencies.py
+│   │   │   │   ├── service.py
+│   │   │   │   ├── repository.py
+│   │   │   │   ├── security.py
+│   │   │   │   └── errors.py
 │   │   │   ├── health/
 │   │   │   │   ├── router.py
 │   │   │   │   └── schemas.py
@@ -791,14 +912,20 @@ visual-scan/
 │   │   │       ├── schemas.py
 │   │   │       ├── service.py
 │   │   │       ├── repository.py
-│   │   │       ├── schema.py
 │   │   │       └── errors.py
+│   │   ├── storage/
+│   │   │   ├── database.py
+│   │   │   ├── schema.py
+│   │   │   └── errors.py
 │   │   ├── factory.py
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── conftest.py
 │   │   ├── test_analysis_api.py
 │   │   ├── test_analysis_pipeline.py
+│   │   ├── test_auth_api.py
+│   │   ├── test_auth_service.py
+│   │   ├── test_database_schema_v2.py
 │   │   ├── test_health.py
 │   │   ├── test_module_map.py
 │   │   ├── test_openai_compatible_provider.py
@@ -807,13 +934,18 @@ visual-scan/
 │   │   ├── test_pdf_ocr_api.py
 │   │   ├── test_pdf_ocr_pipeline.py
 │   │   ├── test_pdf_renderer.py
+│   │   ├── test_scan_ownership.py
 │   │   ├── test_scans_api.py
 │   │   ├── test_scans_service.py
+│   │   ├── test_sqlite_auth_repository.py
 │   │   ├── test_sqlite_scan_repository.py
 │   │   └── test_tesseract_provider.py
 │   ├── .env.example
 │   ├── ARCHITECTURE.md
+│   ├── DEPENDENCY_GRAPH.md
 │   ├── module-map.json
+│   ├── scripts/
+│   │   └── generate_dependency_graph.py
 │   └── pyproject.toml
 ├── frontend/
 │   ├── assets/
@@ -825,6 +957,7 @@ visual-scan/
 │   │   ├── imageUtils.js
 │   │   ├── ocr.js
 │   │   ├── api.js
+│   │   ├── auth.js
 │   │   ├── archive.js
 │   │   └── store.js
 │   ├── index.html
@@ -838,6 +971,7 @@ visual-scan/
 ├── tests/
 │   ├── api.test.mjs
 │   ├── archive.test.mjs
+│   ├── auth.test.mjs
 │   ├── ocr.test.mjs
 │   └── store.test.mjs
 ├── public/
@@ -855,18 +989,24 @@ visual-scan/
 - `backend/app/core/config.py` owns environment-backed settings.
 - `backend/app/features/analysis` owns AI document analysis and the
   OpenAI-compatible provider boundary.
+- `backend/app/features/auth` owns users, password hashing, opaque sessions,
+  CSRF, public authentication dependencies, and rate limits.
 - `backend/app/features/health` owns the health contract and endpoint.
 - `backend/app/features/ocr` owns server-side image and PDF validation,
   serialized PDFium rendering, preprocessing, and Tesseract recognition.
 - `backend/app/features/scans` owns immutable scan contracts, archive
-  invariants, search/list behavior, and SQLite persistence.
+  invariants, ownership-scoped SQL, search/list behavior, and legacy claim.
+- `backend/app/storage` owns SQLite connections, WAL, transactions, schema
+  versions, strict validation, and migrations for all feature repositories.
 - `backend/module-map.json` is the backend navigation and ownership index.
+- `backend/DEPENDENCY_GRAPH.md` is deterministically generated from that map.
 - `app.js` connects the interface, state, and user actions.
 - `config.js` contains browser/runtime URLs and safety limits.
 - `ocrProfiles.js` is the shared pure OCR registry.
 - `imageUtils.js` contains Canvas image operations.
 - `ocr.js` owns availability, the active Tesseract worker, and OCR progress.
 - `api.js` is the only backend HTTP transport module.
+- `auth.js` owns pure frontend auth validation and state-transition helpers.
 - `archive.js` owns pure OCR/archive mapping, freshness, pagination, and
   complete-export coordination.
 - `store.js` is a compatibility reader/export/clear adapter for legacy

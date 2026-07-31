@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -50,7 +50,18 @@ async def application_client(application: FastAPI) -> AsyncIterator[AsyncClient]
         async with AsyncClient(
             transport=transport,
             base_url="http://testserver",
+            headers={"Origin": "http://localhost:5500"},
         ) as client:
+            prefix = application.state.settings.api_prefix
+            registered = await client.post(
+                f"{prefix}/auth/register",
+                json={
+                    "username": f"user-{uuid4().hex[:12]}",
+                    "password": "correct horse battery staple",
+                },
+            )
+            assert registered.status_code == 201
+            client.headers["X-CSRF-Token"] = registered.json()["csrf_token"]
             yield client
 
 
@@ -389,7 +400,7 @@ class FailingService:
     def __init__(self, error: Exception) -> None:
         self.error = error
 
-    def create(self, payload) -> None:
+    def create(self, owner_id, payload) -> None:
         raise self.error
 
 
@@ -461,7 +472,9 @@ async def test_storage_bootstrap_failure_prevents_startup(
 ) -> None:
     application = create_app(test_settings.model_copy(update={"scans_database_path": tmp_path}))
 
-    with pytest.raises(ScanStorageUnavailableError):
+    from app.storage.errors import StorageUnavailableError
+
+    with pytest.raises(StorageUnavailableError):
         async with application.router.lifespan_context(application):
             pass
 

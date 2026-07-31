@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -95,7 +96,18 @@ async def application_client(application: FastAPI) -> AsyncIterator[AsyncClient]
         async with AsyncClient(
             transport=transport,
             base_url="http://testserver",
+            headers={"Origin": "http://localhost:5500"},
         ) as client:
+            prefix = application.state.settings.api_prefix
+            registered = await client.post(
+                f"{prefix}/auth/register",
+                json={
+                    "username": f"user-{uuid4().hex[:12]}",
+                    "password": "correct horse battery staple",
+                },
+            )
+            assert registered.status_code == 201
+            client.headers["X-CSRF-Token"] = registered.json()["csrf_token"]
             yield client
 
 

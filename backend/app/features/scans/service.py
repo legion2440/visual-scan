@@ -10,11 +10,14 @@ from uuid import UUID, uuid4
 from app.core.config import Settings
 from app.features.scans.errors import (
     EmptyScanTextError,
+    LegacyClaimForbiddenError,
     ScanNotFoundError,
     ScanTextTooLargeError,
 )
 from app.features.scans.repository import SQLiteScanRepository
 from app.features.scans.schemas import (
+    LegacyClaimResponse,
+    LegacyScanStatus,
     ScanClassificationFilter,
     ScanClearResponse,
     ScanCreateRequest,
@@ -25,19 +28,19 @@ from app.features.scans.schemas import (
     ScanSort,
     SortOrder,
 )
+from app.storage.database import SQLiteDatabase
 
 
 class ScanRepository(Protocol):
     """Persistence behavior required by the scan service."""
 
-    def bootstrap(self) -> None: ...
+    def create(self, owner_id: UUID, record: ScanDetail) -> ScanDetail: ...
 
-    def create(self, record: ScanDetail) -> ScanDetail: ...
-
-    def get(self, scan_id: UUID) -> ScanDetail | None: ...
+    def get(self, owner_id: UUID, scan_id: UUID) -> ScanDetail | None: ...
 
     def list(
         self,
+        owner_id: UUID,
         *,
         limit: int,
         offset: int,
@@ -47,9 +50,13 @@ class ScanRepository(Protocol):
         order: SortOrder,
     ) -> tuple[list[ScanDetail], int]: ...
 
-    def delete(self, scan_id: UUID) -> bool: ...
+    def delete(self, owner_id: UUID, scan_id: UUID) -> bool: ...
 
-    def clear(self) -> int: ...
+    def clear(self, owner_id: UUID) -> int: ...
+
+    def legacy_count(self) -> int: ...
+
+    def claim_legacy(self, owner_id: UUID) -> int: ...
 
 
 def sanitize_filename(filename: str) -> str:
@@ -83,11 +90,7 @@ class ScanService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._uuid_factory = uuid_factory
 
-    def bootstrap(self) -> None:
-        """Prepare storage during the application lifespan."""
-        self._repository.bootstrap()
-
-    def create(self, payload: ScanCreateRequest) -> ScanDetail:
+    def create(self, owner_id: UUID, payload: ScanCreateRequest) -> ScanDetail:
         """Create one server-identified immutable scan record."""
         if len(payload.text) > self._max_text_chars:
             raise ScanTextTooLargeError(
@@ -108,17 +111,18 @@ class ScanService:
             analysis=payload.analysis,
             ocr=payload.ocr,
         )
-        return self._repository.create(record)
+        return self._repository.create(owner_id, record)
 
-    def get(self, scan_id: UUID) -> ScanDetail:
+    def get(self, owner_id: UUID, scan_id: UUID) -> ScanDetail:
         """Return one scan or a safe not-found error."""
-        record = self._repository.get(scan_id)
+        record = self._repository.get(owner_id, scan_id)
         if record is None:
             raise ScanNotFoundError()
         return record
 
     def list(
         self,
+        owner_id: UUID,
         *,
         limit: int,
         offset: int,
@@ -129,6 +133,7 @@ class ScanService:
     ) -> ScanListResponse:
         """Return compact list items without full text or structured fields."""
         records, total = self._repository.list(
+            owner_id,
             limit=limit,
             offset=offset,
             query=query,
@@ -143,14 +148,32 @@ class ScanService:
             offset=offset,
         )
 
-    def delete(self, scan_id: UUID) -> None:
+    def delete(self, owner_id: UUID, scan_id: UUID) -> None:
         """Delete one record and reject missing identifiers."""
-        if not self._repository.delete(scan_id):
+        if not self._repository.delete(owner_id, scan_id):
             raise ScanNotFoundError()
 
-    def clear(self) -> ScanClearResponse:
+    def clear(self, owner_id: UUID) -> ScanClearResponse:
         """Delete all records and report the exact count."""
-        return ScanClearResponse(deleted=self._repository.clear())
+        return ScanClearResponse(deleted=self._repository.clear(owner_id))
+
+    def legacy_status(self, *, is_initial_user: bool) -> LegacyScanStatus:
+        """Expose only a count to the one user allowed to claim old records."""
+        if not is_initial_user:
+            raise LegacyClaimForbiddenError()
+        count = self._repository.legacy_count()
+        return LegacyScanStatus(count=count, claimable=count > 0)
+
+    def claim_legacy(
+        self,
+        owner_id: UUID,
+        *,
+        is_initial_user: bool,
+    ) -> LegacyClaimResponse:
+        """Idempotently claim the complete pre-auth archive."""
+        if not is_initial_user:
+            raise LegacyClaimForbiddenError()
+        return LegacyClaimResponse(claimed=self._repository.claim_legacy(owner_id))
 
     @staticmethod
     def _to_list_item(record: ScanDetail) -> ScanListItem:
@@ -173,12 +196,9 @@ class ScanService:
         )
 
 
-def create_scans_service(settings: Settings) -> ScanService:
+def create_scans_service(database: SQLiteDatabase, settings: Settings) -> ScanService:
     """Build one resource-free app-local service from validated settings."""
-    repository = SQLiteScanRepository(
-        database_path=settings.scans_database_path,
-        busy_timeout_ms=settings.scans_database_busy_timeout_ms,
-    )
+    repository = SQLiteScanRepository(database)
     return ScanService(
         repository,
         max_text_chars=settings.scans_max_text_chars,

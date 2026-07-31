@@ -15,6 +15,7 @@ dependencies = [
   "pydantic-settings>=2.14,<3.0",
   "pypdfium2>=5.12.1,<6.0",
   "pytesseract>=0.3.13,<1.0",
+  "pwdlib[argon2]>=0.3,<1.0",
   "python-multipart>=0.0.22,<1.0",
   "uvicorn>=0.51,<1.0",
 ]

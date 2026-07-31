@@ -208,3 +208,52 @@ test('invalid JSON from an HTTP response remains a reachable HTTP error', async 
     status: 200,
   });
 });
+
+test('auth transport includes credentials and scopes in-memory CSRF to unsafe requests', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    api.clearCsrfToken();
+  });
+  api.clearCsrfToken();
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return jsonResponse({ authenticated: false, user: null, csrf_token: null });
+  };
+
+  await api.authSession();
+  api.setCsrfToken('memory-only-csrf');
+  await api.register({ username: 'user', password: 'long enough password' });
+  await api.listScans({});
+  await api.createScan({ filename: 'a', text: 'text', analysis: null, ocr: null });
+  await api.logout();
+
+  assert.ok(calls.every((call) => call.options.credentials === 'include'));
+  assert.equal(calls[0].options.headers, undefined);
+  assert.equal(calls[1].options.headers['X-CSRF-Token'], undefined);
+  assert.equal(calls[2].options.headers, undefined);
+  assert.equal(calls[3].options.headers['X-CSRF-Token'], 'memory-only-csrf');
+  assert.equal(calls[4].options.headers['X-CSRF-Token'], 'memory-only-csrf');
+});
+
+test('a 401 clears CSRF before the next unsafe request', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    api.clearCsrfToken();
+  });
+  api.setCsrfToken('expired-csrf');
+  globalThis.fetch = async (_url, options) => {
+    calls.push(options);
+    return calls.length === 1
+      ? jsonResponse({ detail: 'Authentication is required.' }, 401)
+      : jsonResponse({ deleted: 0 });
+  };
+
+  await assert.rejects(api.clearScans(), { status: 401 });
+  await api.clearScans();
+  assert.equal(calls[0].headers['X-CSRF-Token'], 'expired-csrf');
+  assert.equal(calls[1].headers, undefined);
+});

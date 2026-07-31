@@ -1,6 +1,8 @@
 """Structural validation for the agent navigation module map."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -41,10 +43,11 @@ def iter_referenced_paths(module_map: dict[str, Any]) -> list[str]:
         application["api_router"],
     ]
 
-    for feature in module_map["features"].values():
-        paths.append(feature["entrypoint"])
-        for field in ("contracts", "implementation", "depends_on", "tests"):
-            paths.extend(feature.get(field, []))
+    for group in ("infrastructure", "features"):
+        for component in module_map.get(group, {}).values():
+            paths.append(component["entrypoint"])
+            for field in ("contracts", "implementation", "depends_on", "tests"):
+                paths.extend(component.get(field, []))
     return paths
 
 
@@ -69,6 +72,7 @@ def test_module_map_is_valid_and_references_existing_repo_files() -> None:
     module_map = load_module_map()
 
     assert module_map["version"] == 1
+    assert module_map["infrastructure"]
     assert module_map["features"]
     for value in iter_referenced_paths(module_map):
         validate_repository_path(value)
@@ -100,3 +104,18 @@ def test_non_repo_relative_posix_paths_are_rejected(invalid_path: str) -> None:
 def test_missing_referenced_file_is_rejected() -> None:
     with pytest.raises(AssertionError, match="Referenced module-map file does not exist"):
         validate_repository_path("backend/app/does-not-exist.py")
+
+
+def test_dependency_graph_is_current_and_dependencies_are_declared() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "backend/scripts/generate_dependency_graph.py",
+            "--check",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -41,6 +41,16 @@ import {
   validPageOffset,
 } from './utils/archive.js';
 import { legacyStore, StorageError } from './utils/store.js';
+import {
+  AuthContractError,
+  anonymousAfterUnauthorized,
+  identityChanged,
+  isAuthRevisionCurrent,
+  normalizeAuthSession,
+  normalizeUsername,
+  serverFeaturesAvailable,
+  validatePassword,
+} from './utils/auth.js';
 
 const el = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -91,6 +101,16 @@ const state = {
     detailCache: new Map(),
   },
   detail: { id: null, revision: 0, controller: null },
+  auth: {
+    status: 'checking',
+    user: null,
+    csrfToken: null,
+    busy: false,
+    revision: 0,
+    controller: null,
+    legacy: { count: 0, claimable: false, busy: false, revision: 0 },
+  },
+  savedEditor: null,
 };
 
 /* ── tabs and connection ─────────────────────────────────────────────── */
@@ -132,9 +152,97 @@ function markBackendReachable() {
   paintConnection();
 }
 
+function authenticated() {
+  return serverFeaturesAvailable(state.auth);
+}
+
+function resetArchiveState() {
+  cancelArchiveList();
+  state.archive.mutationRevision += 1;
+  state.archive.items = [];
+  state.archive.total = 0;
+  state.archive.offset = 0;
+  state.archive.error = '';
+  state.archive.mutationBusy = false;
+  state.archive.exportBusy = false;
+  state.archive.detailCache.clear();
+  closeDetail();
+}
+
+function clearServerDerivedState() {
+  cancelOcrRequest();
+  state.aiController?.abort();
+  invalidateAnalysis({ clear: true });
+  if (state.ocr?.source === 'server') {
+    state.ocr = null;
+    el('ocr-text').value = '';
+    state.savedEditor = null;
+  }
+  if (state.source.kind !== 'pdf' && state.ocrEngine === 'server') {
+    state.ocrEngine = 'browser';
+    el('sel-engine').value = 'browser';
+  }
+  resetArchiveState();
+  state.auth.legacy = { count: 0, claimable: false, busy: false, revision: 0 };
+  paintServerLegacy();
+}
+
+function paintAuthState() {
+  const checking = state.auth.status === 'checking';
+  const signedIn = authenticated();
+  el('auth-label').textContent = checking
+    ? 'Session: checking…'
+    : signedIn
+      ? `Signed in: ${state.auth.user.username}`
+      : 'Session: anonymous';
+  el('btn-sign-in').hidden = checking || signedIn;
+  el('btn-register').hidden = checking || signedIn;
+  el('btn-logout').hidden = !signedIn;
+  el('btn-logout').disabled = state.auth.busy;
+  el('archive-sign-in').hidden = signedIn || checking;
+  syncSourceControls();
+  syncTextState();
+  renderArchive();
+  paintAiAvailability();
+}
+
+function applyAuthenticatedSession(session) {
+  const previousUser = state.auth.user;
+  if (identityChanged(previousUser, session.user)) clearServerDerivedState();
+  state.auth.status = session.status;
+  state.auth.user = session.user;
+  state.auth.csrfToken = session.csrfToken;
+  state.auth.busy = false;
+  api.setCsrfToken(session.csrfToken);
+  paintAuthState();
+}
+
+function becomeAnonymous(message = '') {
+  api.clearCsrfToken();
+  state.auth = {
+    ...anonymousAfterUnauthorized(state.auth),
+    controller: null,
+    legacy: { count: 0, claimable: false, busy: false, revision: 0 },
+  };
+  clearServerDerivedState();
+  paintAuthState();
+  if (message) notice(message, 'error');
+}
+
+function handleProtectedApiError(error) {
+  applyApiReachability(error);
+  if (error instanceof ApiError && error.status === 401) {
+    becomeAnonymous('Your session ended. Sign in again to use server features.');
+    return true;
+  }
+  return false;
+}
+
 function paintAiAvailability() {
   const status = el('ai-availability');
-  if (state.health.aiAvailable === false) {
+  if (!authenticated()) {
+    status.textContent = 'Sign in to use AI analysis. Browser OCR remains available.';
+  } else if (state.health.aiAvailable === false) {
     status.textContent = 'AI analysis is not configured on the backend.';
   } else if (state.health.aiAvailable === true) {
     status.textContent = state.health.provider
@@ -671,7 +779,10 @@ function paintOcrAvailability({ selectFirstLanguage = false } = {}) {
   }
 
   const status = el('model-status');
-  if (!browserMode) {
+  if (!browserMode && !authenticated()) {
+    status.textContent = 'Sign in to use server OCR.';
+    status.dataset.state = 'missing';
+  } else if (!browserMode) {
     status.textContent = state.source.kind === 'pdf'
       ? 'PDF OCR uses the original file and system Tesseract on the backend.'
       : 'Server OCR uses the processed Canvas image and system Tesseract.';
@@ -695,6 +806,9 @@ function syncSourceControls() {
     el('sel-engine').value = 'server';
   }
   el('sel-engine').disabled = isPdf || state.ocrBusy;
+  const serverOption = Array.from(el('sel-engine').options)
+    .find((option) => option.value === 'server');
+  if (serverOption) serverOption.disabled = !authenticated();
   el('sel-model').hidden = false;
   el('sel-model').closest('.field').hidden = !(!isPdf && state.ocrEngine === 'browser');
   el('pdf-options').hidden = !isPdf;
@@ -720,6 +834,7 @@ function syncOcrControls() {
   );
   el('btn-ocr').disabled = state.ocrBusy
     || !hasSource
+    || (!browserMode && !authenticated())
     || (browserMode && !selectedLocalCombinationAvailable());
   el('pdf-preprocessing').disabled = state.ocrBusy;
   el('pdf-threshold').disabled = state.ocrBusy;
@@ -767,6 +882,11 @@ el('pdf-preprocessing').addEventListener('change', (event) => {
 el('btn-ocr').addEventListener('click', runOcr);
 
 async function runOcr() {
+  if ((state.source.kind === 'pdf' || state.ocrEngine === 'server') && !authenticated()) {
+    notice('Sign in before using server OCR.', 'error');
+    openAuthDialog('login');
+    return;
+  }
   if (state.source.kind === 'pdf') {
     await runPdfOcr();
   } else if (state.ocrEngine === 'server') {
@@ -882,7 +1002,7 @@ async function runServerImageOcr() {
     notice(`Server OCR recognised ${result.words} words.`, result.text ? 'ok' : 'error');
   } catch (error) {
     if (!ocrRunIsCurrent(run) || error?.kind === 'cancelled') return;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     notice(`Server OCR failed: ${error.message || 'Unknown error.'}`, 'error');
   } finally {
     finishOcr(run);
@@ -925,7 +1045,7 @@ async function runPdfOcr() {
     );
   } catch (error) {
     if (!ocrRunIsCurrent(run) || error?.kind === 'cancelled') return;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     notice(`PDF OCR failed: ${error.message || 'Unknown error.'}`, 'error');
   } finally {
     finishOcr(run);
@@ -988,9 +1108,10 @@ function syncTextState() {
     : 'no text yet';
   el('btn-analyze').disabled = !text
     || state.aiBusy
+    || !authenticated()
     || state.health.aiAvailable === false;
   el('btn-copy').disabled = !text;
-  el('btn-save').disabled = !text || state.saveBusy;
+  el('btn-save').disabled = !text || state.saveBusy || !authenticated();
   paintAiFreshness();
 }
 
@@ -1007,6 +1128,11 @@ el('btn-analyze').addEventListener('click', async () => {
   const text = el('ocr-text').value;
   if (!text.trim()) {
     notice('Extract or enter text before requesting AI analysis.', 'error');
+    return;
+  }
+  if (!authenticated()) {
+    notice('Sign in before requesting AI analysis.', 'error');
+    openAuthDialog('login');
     return;
   }
   if (state.health.aiAvailable === false) {
@@ -1041,7 +1167,7 @@ el('btn-analyze').addEventListener('click', async () => {
     paintAI(result);
   } catch (error) {
     if (revision !== state.aiRevision || error?.kind === 'cancelled') return;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     notice(`AI analysis is unavailable: ${error.message} Your OCR text is unchanged.`, 'error');
   } finally {
     if (revision === state.aiRevision) {
@@ -1080,6 +1206,11 @@ el('btn-save').addEventListener('click', saveCurrentScan);
 async function saveCurrentScan() {
   const text = el('ocr-text').value;
   if (!text.trim() || state.saveBusy) return;
+  if (!authenticated()) {
+    notice('Sign in before saving to the server archive.', 'error');
+    openAuthDialog('login');
+    return;
+  }
   const context = currentAnalysisContext(text);
   let payload;
   try {
@@ -1116,6 +1247,7 @@ async function saveCurrentScan() {
     const saved = await api.createScan(payload);
     markBackendReachable();
     const savedId = saved?.id || 'unknown ID';
+    state.savedEditor = { sourceRevision: state.sourceRevision, text };
     notice(`Saved to the server archive as ${savedId}.`, 'ok');
     const reloaded = await loadArchive({ clearCache: true, quiet: true });
     if (!reloaded) {
@@ -1125,7 +1257,7 @@ async function saveCurrentScan() {
       );
     }
   } catch (error) {
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     const uncertain = error instanceof ApiError && (
       ['network', 'timeout'].includes(error.kind)
       || (error.status >= 200 && error.status < 300)
@@ -1160,6 +1292,11 @@ function cancelArchiveList() {
 }
 
 async function loadArchive({ clearCache = false, quiet = false } = {}) {
+  if (!authenticated()) {
+    resetArchiveState();
+    renderArchive();
+    return false;
+  }
   cancelArchiveList();
   const revision = state.archive.revision;
   const controller = new AbortController();
@@ -1198,7 +1335,7 @@ async function loadArchive({ clearCache = false, quiet = false } = {}) {
     return true;
   } catch (error) {
     if (revision !== state.archive.revision || error?.kind === 'cancelled') return false;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return false;
     state.archive.error = `Archive could not be loaded: ${error.message}`;
     if (!quiet) notice(state.archive.error, 'error');
     return false;
@@ -1272,23 +1409,30 @@ $$('.sortable').forEach((heading) => {
 
 function renderArchive() {
   const archive = state.archive;
+  const signedIn = authenticated();
   const first = archive.total ? archive.offset + 1 : 0;
   const last = Math.min(archive.offset + archive.items.length, archive.total);
   el('tab-count').textContent = archive.total;
   el('results-count').textContent =
     `${first}–${last} of ${archive.total} document${archive.total === 1 ? '' : 's'}`;
-  el('results-status').textContent = archive.busy
+  el('results-status').textContent = !signedIn
+    ? 'Sign in to load the server archive.'
+    : archive.busy
     ? 'Loading server archive…'
     : archive.error;
   el('results-status').dataset.state = archive.error ? 'missing' : 'ready';
-  el('results-empty').hidden = archive.busy || archive.items.length > 0 || Boolean(archive.error);
-  el('btn-clear').disabled = archive.mutationBusy || archive.exportBusy || archive.total === 0;
-  el('btn-export').disabled = archive.exportBusy || archive.total === 0;
-  el('q').disabled = archive.exportBusy;
-  el('filter-class').disabled = archive.exportBusy;
-  el('page-size').disabled = archive.exportBusy;
-  el('page-prev').disabled = archive.busy || archive.exportBusy || archive.offset === 0;
-  el('page-next').disabled = archive.busy
+  el('results-empty').hidden = !signedIn
+    || archive.busy || archive.items.length > 0 || Boolean(archive.error);
+  el('btn-clear').disabled = !signedIn
+    || archive.mutationBusy || archive.exportBusy || archive.total === 0;
+  el('btn-export').disabled = !signedIn || archive.exportBusy || archive.total === 0;
+  el('q').disabled = !signedIn || archive.exportBusy;
+  el('filter-class').disabled = !signedIn || archive.exportBusy;
+  el('page-size').disabled = !signedIn || archive.exportBusy;
+  el('page-prev').disabled = !signedIn
+    || archive.busy || archive.exportBusy || archive.offset === 0;
+  el('page-next').disabled = !signedIn
+    || archive.busy
     || archive.exportBusy
     || archive.offset + archive.items.length >= archive.total;
   const pages = Math.max(1, Math.ceil(archive.total / archive.limit));
@@ -1362,7 +1506,7 @@ async function deleteScan(id) {
     }
   } catch (error) {
     if (revision !== state.archive.mutationRevision || error?.kind === 'cancelled') return;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     if (error instanceof ApiError && error.status === 404) {
       state.archive.detailCache.clear();
       if (state.detail.id === id) closeDetail();
@@ -1404,7 +1548,7 @@ el('btn-clear').addEventListener('click', async () => {
     notice(`Deleted ${response?.deleted || 0} server archive record(s).`, 'ok');
   } catch (error) {
     if (revision !== state.archive.mutationRevision || error?.kind === 'cancelled') return;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     notice(`Could not clear the server archive: ${error.message}`, 'error');
   } finally {
     if (revision === state.archive.mutationRevision) {
@@ -1443,7 +1587,7 @@ async function openDetail(id) {
     paintDetail(record);
   } catch (error) {
     if (revision !== state.detail.revision || error?.kind === 'cancelled') return;
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     if (error instanceof ApiError && error.status === 404) {
       closeDetail();
       notice('That scan no longer exists. Reloading the archive.', 'error');
@@ -1486,6 +1630,7 @@ el('detail').addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !el('detail').hidden) closeDetail();
+  if (event.key === 'Escape' && !el('auth-dialog').hidden) closeAuthDialog();
 });
 
 el('btn-export').addEventListener('click', async () => {
@@ -1504,7 +1649,7 @@ el('btn-export').addEventListener('click', async () => {
     downloadJson(records, 'visual-scan-server-archive.json');
     notice(`Exported ${records.length} complete server record(s).`, 'ok');
   } catch (error) {
-    applyApiReachability(error);
+    if (handleProtectedApiError(error)) return;
     notice(`Export stopped without creating a partial file: ${error.message}`, 'error');
   } finally {
     state.archive.exportBusy = false;
@@ -1539,6 +1684,271 @@ el('btn-legacy-clear').addEventListener('click', () => {
       ? error.message
       : 'Browser storage is unavailable.';
     notice(`Could not delete legacy records: ${message}`, 'error');
+  }
+});
+
+/* ── authentication and pre-auth server archive ─────────────────────── */
+
+let authMode = 'login';
+
+function setAuthMode(mode) {
+  authMode = mode === 'register' ? 'register' : 'login';
+  const registering = authMode === 'register';
+  el('auth-title').textContent = registering ? 'Register' : 'Sign in';
+  el('auth-submit').textContent = registering ? 'Create account' : 'Sign in';
+  el('auth-mode-login').className = `btn ${registering ? 'btn-ghost' : 'btn-secondary'}`;
+  el('auth-mode-register').className = `btn ${registering ? 'btn-secondary' : 'btn-ghost'}`;
+  el('auth-password').autocomplete = registering ? 'new-password' : 'current-password';
+  el('auth-error').hidden = true;
+}
+
+function openAuthDialog(mode = 'login') {
+  if (state.auth.busy) return;
+  setAuthMode(mode);
+  el('auth-dialog').hidden = false;
+  el('auth-username').focus();
+}
+
+function closeAuthDialog() {
+  if (state.auth.busy) return;
+  el('auth-dialog').hidden = true;
+  el('auth-password').value = '';
+  el('auth-password').type = 'password';
+  el('auth-show-password').textContent = 'Show';
+  el('auth-error').hidden = true;
+}
+
+function paintAuthBusy() {
+  for (const id of [
+    'auth-username',
+    'auth-password',
+    'auth-submit',
+    'auth-mode-login',
+    'auth-mode-register',
+    'auth-close',
+  ]) {
+    el(id).disabled = state.auth.busy;
+  }
+  el('auth-submit').textContent = state.auth.busy
+    ? (authMode === 'register' ? 'Creating…' : 'Signing in…')
+    : (authMode === 'register' ? 'Create account' : 'Sign in');
+}
+
+el('btn-sign-in').addEventListener('click', () => openAuthDialog('login'));
+el('btn-register').addEventListener('click', () => openAuthDialog('register'));
+el('btn-archive-sign-in').addEventListener('click', () => openAuthDialog('login'));
+el('auth-mode-login').addEventListener('click', () => setAuthMode('login'));
+el('auth-mode-register').addEventListener('click', () => setAuthMode('register'));
+el('auth-close').addEventListener('click', closeAuthDialog);
+el('auth-dialog').addEventListener('click', (event) => {
+  if (event.target === el('auth-dialog')) closeAuthDialog();
+});
+el('auth-show-password').addEventListener('click', () => {
+  const showing = el('auth-password').type === 'text';
+  el('auth-password').type = showing ? 'password' : 'text';
+  el('auth-show-password').textContent = showing ? 'Show' : 'Hide';
+});
+
+el('auth-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (state.auth.busy) return;
+  let credentials;
+  try {
+    credentials = {
+      username: normalizeUsername(el('auth-username').value),
+      password: validatePassword(el('auth-password').value),
+    };
+  } catch (error) {
+    el('auth-error').textContent = error instanceof AuthContractError
+      ? error.message
+      : 'Check the account fields.';
+    el('auth-error').hidden = false;
+    return;
+  }
+
+  state.auth.revision += 1;
+  const revision = state.auth.revision;
+  state.auth.controller?.abort();
+  const controller = new AbortController();
+  state.auth.controller = controller;
+  state.auth.busy = true;
+  el('auth-error').hidden = true;
+  paintAuthBusy();
+  paintAuthState();
+  try {
+    const response = authMode === 'register'
+      ? await api.register(credentials, { signal: controller.signal })
+      : await api.login(credentials, { signal: controller.signal });
+    if (!isAuthRevisionCurrent(state.auth, revision)) return;
+    const session = normalizeAuthSession(response);
+    markBackendReachable();
+    applyAuthenticatedSession(session);
+    state.auth.controller = null;
+    el('auth-dialog').hidden = true;
+    el('auth-password').value = '';
+    notice(authMode === 'register' ? 'Account created and signed in.' : 'Signed in.', 'ok');
+    const reloaded = await loadArchive({ clearCache: true, quiet: true });
+    if (!reloaded && authenticated()) {
+      notice('Signed in, but the server archive could not be refreshed.', 'error');
+    }
+    await loadServerLegacyStatus();
+  } catch (error) {
+    if (!isAuthRevisionCurrent(state.auth, revision) || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    el('auth-error').textContent = error.message || 'Authentication failed.';
+    el('auth-error').hidden = false;
+  } finally {
+    if (isAuthRevisionCurrent(state.auth, revision)) {
+      state.auth.busy = false;
+      state.auth.controller = null;
+      paintAuthBusy();
+      paintAuthState();
+    }
+  }
+});
+
+async function restoreAuthSession() {
+  state.auth.revision += 1;
+  const revision = state.auth.revision;
+  state.auth.controller?.abort();
+  const controller = new AbortController();
+  state.auth.controller = controller;
+  state.auth.status = 'checking';
+  state.auth.busy = true;
+  paintAuthState();
+  try {
+    const response = await api.authSession({ signal: controller.signal });
+    if (!isAuthRevisionCurrent(state.auth, revision)) return;
+    markBackendReachable();
+    const session = normalizeAuthSession(response);
+    if (session.status === 'authenticated') {
+      applyAuthenticatedSession(session);
+      await loadArchive({ clearCache: true, quiet: true });
+      await loadServerLegacyStatus();
+    } else {
+      api.clearCsrfToken();
+      state.auth.status = 'anonymous';
+      state.auth.user = null;
+      state.auth.csrfToken = null;
+    }
+  } catch (error) {
+    if (!isAuthRevisionCurrent(state.auth, revision) || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    api.clearCsrfToken();
+    state.auth.status = 'anonymous';
+    state.auth.user = null;
+    state.auth.csrfToken = null;
+  } finally {
+    if (isAuthRevisionCurrent(state.auth, revision)) {
+      state.auth.busy = false;
+      state.auth.controller = null;
+      paintAuthState();
+    }
+  }
+}
+
+el('btn-logout').addEventListener('click', async () => {
+  if (!authenticated() || state.auth.busy) return;
+  const text = el('ocr-text').value;
+  const unsaved = text.trim() && (
+    !state.savedEditor
+    || state.savedEditor.sourceRevision !== state.sourceRevision
+    || state.savedEditor.text !== text
+  );
+  if (unsaved && !confirm(
+    'Log out with unsaved editor text? Account-derived results will be cleared; browser/manual text remains local.',
+  )) return;
+
+  state.auth.revision += 1;
+  const revision = state.auth.revision;
+  state.auth.busy = true;
+  const controller = new AbortController();
+  state.auth.controller = controller;
+  paintAuthState();
+  try {
+    await api.logout({ signal: controller.signal });
+    if (!isAuthRevisionCurrent(state.auth, revision)) return;
+    markBackendReachable();
+    becomeAnonymous();
+    notice('Signed out. Browser OCR and manual text remain available.', 'ok');
+  } catch (error) {
+    if (!isAuthRevisionCurrent(state.auth, revision) || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    notice(`Could not sign out: ${error.message}`, 'error');
+  } finally {
+    if (isAuthRevisionCurrent(state.auth, revision)) {
+      state.auth.busy = false;
+      state.auth.controller = null;
+      paintAuthState();
+    }
+  }
+});
+
+function paintServerLegacy() {
+  const legacy = state.auth.legacy;
+  const visible = authenticated()
+    && state.auth.user.isInitialUser
+    && legacy.count > 0;
+  el('server-legacy-banner').hidden = !visible;
+  el('server-legacy-count').textContent = legacy.count;
+  el('btn-server-legacy-claim').disabled = legacy.busy || !legacy.claimable;
+}
+
+async function loadServerLegacyStatus() {
+  state.auth.legacy.revision += 1;
+  const revision = state.auth.legacy.revision;
+  if (!authenticated() || !state.auth.user.isInitialUser) {
+    state.auth.legacy.count = 0;
+    state.auth.legacy.claimable = false;
+    paintServerLegacy();
+    return;
+  }
+  try {
+    const response = await api.legacyScans();
+    if (revision !== state.auth.legacy.revision || !authenticated()) return;
+    markBackendReachable();
+    state.auth.legacy.count = Number.isInteger(response?.count) ? response.count : 0;
+    state.auth.legacy.claimable = response?.claimable === true;
+  } catch (error) {
+    if (revision !== state.auth.legacy.revision || error?.kind === 'cancelled') return;
+    if (!handleProtectedApiError(error) && error?.status !== 403) {
+      notice(`Could not check the pre-auth server archive: ${error.message}`, 'error');
+    }
+  } finally {
+    if (revision === state.auth.legacy.revision) paintServerLegacy();
+  }
+}
+
+el('btn-server-legacy-claim').addEventListener('click', async () => {
+  const legacy = state.auth.legacy;
+  if (!authenticated() || !legacy.claimable || legacy.busy) return;
+  if (!confirm(`Claim ${legacy.count} pre-auth server record(s) for this account?`)) return;
+  legacy.revision += 1;
+  const revision = legacy.revision;
+  legacy.busy = true;
+  paintServerLegacy();
+  try {
+    const response = await api.claimLegacyScans();
+    if (revision !== legacy.revision || !authenticated()) return;
+    markBackendReachable();
+    const claimed = Number.isInteger(response?.claimed) ? response.claimed : 0;
+    legacy.count = 0;
+    legacy.claimable = false;
+    notice(`Claimed ${claimed} pre-auth server record(s).`, 'ok');
+    const reloaded = await loadArchive({ clearCache: true, quiet: true });
+    if (!reloaded && authenticated()) {
+      notice(`Claimed ${claimed} record(s), but the archive view could not be refreshed.`, 'error');
+    }
+  } catch (error) {
+    if (revision !== legacy.revision || error?.kind === 'cancelled') return;
+    if (!handleProtectedApiError(error)) {
+      notice(`Could not claim the pre-auth server archive: ${error.message}`, 'error');
+    }
+  } finally {
+    if (revision === legacy.revision) {
+      legacy.busy = false;
+      paintServerLegacy();
+    }
   }
 });
 
@@ -1612,5 +2022,8 @@ paintLegacyBanner();
 renderArchive();
 syncTextState();
 paintOcrAvailability();
+paintServerLegacy();
+paintAuthState();
 loadOcrModels();
 checkBackend();
+restoreAuthSession();

@@ -59,6 +59,24 @@ async def test_unlisted_cors_origin_is_not_allowed(client: AsyncClient) -> None:
     assert "access-control-allow-origin" not in response.headers
 
 
+async def test_credentialed_cors_preflight_uses_explicit_methods_and_headers(
+    anonymous_client: AsyncClient,
+) -> None:
+    response = await anonymous_client.options(
+        "/api/scans",
+        headers={
+            "Origin": "http://localhost:5500",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-csrf-token",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5500"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert "POST" in response.headers["access-control-allow-methods"]
+    assert "x-csrf-token" in response.headers["access-control-allow-headers"].lower()
+
+
 async def test_application_factory_accepts_explicit_settings() -> None:
     settings = Settings(
         _env_file=None,
@@ -161,6 +179,28 @@ async def test_disabled_ai_ignores_empty_provider_configuration() -> None:
 
     assert settings.ai_enabled is False
     assert settings.ai_provider_name == ""
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        ["*"],
+        ["http://localhost:5500/"],
+        ["http://localhost:5500/path"],
+        ["http://user@localhost:5500"],
+        [],
+    ],
+)
+async def test_credentialed_cors_origins_must_be_explicit_and_canonical(
+    origins: list[str],
+) -> None:
+    with pytest.raises(ValueError, match="CORS"):
+        Settings(_env_file=None, cors_origins=origins)
+
+
+async def test_production_requires_an_explicit_auth_hmac_secret() -> None:
+    with pytest.raises(ValueError, match="AUTH_HMAC_SECRET"):
+        Settings(_env_file=None, environment="production")
 
 
 @pytest.mark.parametrize(

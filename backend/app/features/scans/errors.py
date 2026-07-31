@@ -37,3 +37,10 @@ class ScanStorageUnavailableError(ScanError):
 
     status_code = 503
     default_message = "The scan archive is temporarily unavailable."
+
+
+class LegacyClaimForbiddenError(ScanError):
+    """Raised when a non-initial user accesses the pre-auth archive."""
+
+    status_code = 403
+    default_message = "The legacy scan archive is not available to this user."

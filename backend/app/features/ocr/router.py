@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings
+from app.features.auth.dependencies import require_csrf_principal
+from app.features.auth.schemas import AuthenticatedPrincipal
 from app.features.ocr.errors import (
     EmptyImageError,
     EmptyPdfError,
@@ -93,6 +95,7 @@ async def recognize_image(
     request: Request,
     file: Annotated[UploadFile, File()],
     service: Annotated[OcrService, Depends(get_ocr_service)],
+    _principal: Annotated[AuthenticatedPrincipal, Depends(require_csrf_principal)],
     language: Annotated[OcrLanguage, Form()] = OcrLanguage.ENGLISH,
     preprocessing: Annotated[PreprocessingMode, Form()] = PreprocessingMode.NONE,
     threshold: Annotated[int | None, Form(ge=0, le=255)] = None,
@@ -133,6 +136,7 @@ async def recognize_pdf(
     request: Request,
     file: Annotated[UploadFile, File()],
     service: Annotated[OcrService, Depends(get_ocr_service)],
+    _principal: Annotated[AuthenticatedPrincipal, Depends(require_csrf_principal)],
     language: Annotated[OcrLanguage, Form()] = OcrLanguage.ENGLISH,
     preprocessing: Annotated[PreprocessingMode, Form()] = PreprocessingMode.NONE,
     threshold: Annotated[int | None, Form(ge=0, le=255)] = None,

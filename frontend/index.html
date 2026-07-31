@@ -37,6 +37,12 @@
       <span id="conn-label">Backend: checking…</span>
       <button class="btn btn-ghost conn-test" id="conn-test" type="button">Test</button>
     </div>
+    <div class="auth-strip" id="auth-strip">
+      <span id="auth-label">Session: checking…</span>
+      <button class="btn btn-ghost" id="btn-sign-in" type="button" hidden>Sign in</button>
+      <button class="btn btn-secondary" id="btn-register" type="button" hidden>Register</button>
+      <button class="btn btn-ghost" id="btn-logout" type="button" hidden>Log out</button>
+    </div>
   </div>
   <div class="rule-thin"></div>
 </header>
@@ -228,6 +234,22 @@
       <p class="lede results-lede">Saved server records with search, classification filters, deterministic sorting and pagination.</p>
     </div>
 
+    <aside class="legacy-banner" id="archive-sign-in" hidden>
+      <div>
+        <strong>Sign in to use the server archive.</strong>
+        Browser OCR remains available without an account.
+      </div>
+      <button class="btn btn-primary" id="btn-archive-sign-in" type="button">Sign in</button>
+    </aside>
+
+    <aside class="legacy-banner" id="server-legacy-banner" hidden>
+      <div>
+        <strong><span id="server-legacy-count">0</span> pre-auth server record(s) available.</strong>
+        Only the initial user can claim them; nothing is assigned automatically.
+      </div>
+      <button class="btn btn-secondary" id="btn-server-legacy-claim" type="button">Claim server records</button>
+    </aside>
+
     <aside class="legacy-banner" id="legacy-banner" hidden>
       <div>
         <strong><span id="legacy-count">0</span> legacy browser record(s) found.</strong>
@@ -288,6 +310,38 @@
     </div>
   </section>
 </main>
+
+<!-- authentication -->
+<div class="dialog-backdrop" id="auth-dialog" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="dialog-head">
+      <div>
+        <p class="card-kicker">Server account</p>
+        <h3 class="dialog-title" id="auth-title">Sign in</h3>
+      </div>
+      <button class="btn btn-ghost" id="auth-close" type="button">Close</button>
+    </div>
+    <form class="dialog-body auth-form" id="auth-form">
+      <div class="auth-mode" role="group" aria-label="Authentication mode">
+        <button class="btn btn-secondary" id="auth-mode-login" type="button">Sign in</button>
+        <button class="btn btn-ghost" id="auth-mode-register" type="button">Register</button>
+      </div>
+      <div class="field">
+        <label for="auth-username">Username</label>
+        <input class="input" id="auth-username" type="text" maxlength="32" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="auth-password">Password</label>
+        <div class="password-row">
+          <input class="input" id="auth-password" type="password" autocomplete="current-password" required>
+          <button class="btn btn-ghost" id="auth-show-password" type="button">Show</button>
+        </div>
+      </div>
+      <p class="model-status" id="auth-error" role="alert" hidden></p>
+      <button class="btn btn-primary" id="auth-submit" type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
 
 <!-- document detail -->
 <div class="dialog-backdrop" id="detail" hidden>

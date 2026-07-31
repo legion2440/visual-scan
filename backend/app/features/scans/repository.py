@@ -1,25 +1,16 @@
-"""SQLite persistence adapter for saved scan results."""
+"""Owner-scoped SQLite persistence adapter for saved scan results."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
 
 from app.features.scans.errors import ScanStorageUnavailableError
-from app.features.scans.schema import (
-    SCHEMA_VERSION,
-    create_schema_v1,
-    scans_table_exists,
-    validate_schema_v1,
-)
 from app.features.scans.schemas import (
     ScanAnalysisSnapshot,
     ScanClassificationFilter,
@@ -28,8 +19,7 @@ from app.features.scans.schemas import (
     ScanSort,
     SortOrder,
 )
-
-ConnectionFactory = Callable[..., sqlite3.Connection]
+from app.storage.database import SQLiteDatabase
 
 _SORT_EXPRESSIONS = {
     ScanSort.SCANNED_AT: "scanned_at",
@@ -41,13 +31,6 @@ _ORDER_EXPRESSIONS = {
     SortOrder.ASCENDING: "ASC",
     SortOrder.DESCENDING: "DESC",
 }
-
-
-def _casefold(value: object) -> str:
-    """Return a Unicode-aware search value for a SQLite scalar."""
-    if value is None:
-        return ""
-    return str(value).casefold()
 
 
 def _json_dump(value: object) -> str:
@@ -66,88 +49,33 @@ def _timestamp_from_storage(value: str) -> datetime:
 
 
 class SQLiteScanRepository:
-    """Open one configured SQLite connection for each archive operation."""
+    """Use shared database policy while enforcing owner filters in every query."""
 
-    def __init__(
-        self,
-        *,
-        database_path: Path,
-        busy_timeout_ms: int,
-        connection_factory: ConnectionFactory = sqlite3.connect,
-    ) -> None:
-        self._database_path = database_path
-        self._busy_timeout_ms = busy_timeout_ms
-        self._connection_factory = connection_factory
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self._database = database
 
     @property
-    def database_path(self) -> Path:
-        """Expose the resolved path for diagnostics and lifecycle tests."""
-        return self._database_path
+    def database_path(self):
+        return self._database.database_path
 
-    def bootstrap(self) -> None:
-        """Create or strictly validate schema version one."""
-        try:
-            if self._database_path.exists() and self._database_path.is_dir():
-                raise ScanStorageUnavailableError()
-            self._database_path.parent.mkdir(parents=True, exist_ok=True)
-
-            with self._connection() as connection:
-                journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
-                if journal_mode is None or str(journal_mode[0]).casefold() != "wal":
-                    raise ScanStorageUnavailableError()
-                self._run_quick_check(connection)
-
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-                table_exists = scans_table_exists(connection)
-                if version == 0:
-                    if table_exists:
-                        raise ScanStorageUnavailableError()
-                    with self._transaction(connection, immediate=True):
-                        create_schema_v1(connection)
-                elif version != SCHEMA_VERSION:
-                    raise ScanStorageUnavailableError()
-
-                try:
-                    validate_schema_v1(connection)
-                except ValueError as error:
-                    raise ScanStorageUnavailableError() from error
-        except ScanStorageUnavailableError:
-            raise
-        except (sqlite3.IntegrityError, sqlite3.ProgrammingError):
-            raise
-        except (OSError, sqlite3.Error) as error:
-            raise ScanStorageUnavailableError() from error
-
-    def create(self, record: ScanDetail) -> ScanDetail:
-        """Persist one complete record in an explicit write transaction."""
+    def create(self, owner_id: UUID, record: ScanDetail) -> ScanDetail:
         try:
             with (
-                self._connection() as connection,
-                self._transaction(
-                    connection,
-                    immediate=True,
-                ),
+                self._database.connection() as connection,
+                self._database.transaction(connection, immediate=True),
             ):
                 analysis = record.analysis
                 connection.execute(
                     """
-                        INSERT INTO scans (
-                            id,
-                            filename,
-                            scanned_at,
-                            text,
-                            classification,
-                            analysis_confidence,
-                            summary,
-                            provider,
-                            tags_json,
-                            fields_json,
-                            ocr_json
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
+                    INSERT INTO scans (
+                        id, owner_id, filename, scanned_at, text, classification,
+                        analysis_confidence, summary, provider, tags_json,
+                        fields_json, ocr_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         str(record.id),
+                        str(owner_id),
                         record.filename,
                         _timestamp_to_storage(record.scanned_at),
                         record.text,
@@ -161,31 +89,27 @@ class SQLiteScanRepository:
                             if analysis
                             else None
                         ),
-                        (_json_dump(record.ocr.model_dump(mode="json")) if record.ocr else None),
+                        _json_dump(record.ocr.model_dump(mode="json")) if record.ocr else None,
                     ),
                 )
             return record
-        except (sqlite3.IntegrityError, sqlite3.ProgrammingError):
-            raise
         except (OSError, sqlite3.Error) as error:
             raise ScanStorageUnavailableError() from error
 
-    def get(self, scan_id: UUID) -> ScanDetail | None:
-        """Return one scan from a consistent read transaction."""
+    def get(self, owner_id: UUID, scan_id: UUID) -> ScanDetail | None:
         try:
-            with self._connection() as connection, self._transaction(connection):
+            with self._database.connection() as connection, self._database.transaction(connection):
                 row = connection.execute(
-                    "SELECT * FROM scans WHERE id = ?",
-                    (str(scan_id),),
+                    "SELECT * FROM scans WHERE owner_id = ? AND id = ?",
+                    (str(owner_id), str(scan_id)),
                 ).fetchone()
             return self._map_row(row) if row is not None else None
-        except (sqlite3.IntegrityError, sqlite3.ProgrammingError):
-            raise
         except (json.JSONDecodeError, ValidationError, ValueError, OSError, sqlite3.Error) as error:
             raise ScanStorageUnavailableError() from error
 
     def list(
         self,
+        owner_id: UUID,
         *,
         limit: int,
         offset: int,
@@ -194,17 +118,16 @@ class SQLiteScanRepository:
         sort: ScanSort,
         order: SortOrder,
     ) -> tuple[list[ScanDetail], int]:
-        """Return total and page from the same SQLite read snapshot."""
         where_sql, parameters = self._build_filters(
+            owner_id=owner_id,
             query=query,
             classification=classification,
         )
         sort_expression = _SORT_EXPRESSIONS[sort]
         order_expression = _ORDER_EXPRESSIONS[order]
         select_parameters = {**parameters, "limit": limit, "offset": offset}
-
         try:
-            with self._connection() as connection, self._transaction(connection):
+            with self._database.connection() as connection, self._database.transaction(connection):
                 total = int(
                     connection.execute(
                         f"SELECT COUNT(*) FROM scans{where_sql}",
@@ -213,112 +136,99 @@ class SQLiteScanRepository:
                 )
                 rows = connection.execute(
                     f"""
-                        SELECT *
-                        FROM scans
-                        {where_sql}
-                        ORDER BY {sort_expression} {order_expression}, id ASC
-                        LIMIT :limit OFFSET :offset
-                        """,
+                    SELECT * FROM scans
+                    {where_sql}
+                    ORDER BY {sort_expression} {order_expression}, id ASC
+                    LIMIT :limit OFFSET :offset
+                    """,
                     select_parameters,
                 ).fetchall()
             return [self._map_row(row) for row in rows], total
-        except (sqlite3.IntegrityError, sqlite3.ProgrammingError):
-            raise
         except (json.JSONDecodeError, ValidationError, ValueError, OSError, sqlite3.Error) as error:
             raise ScanStorageUnavailableError() from error
 
-    def delete(self, scan_id: UUID) -> bool:
-        """Delete one scan and report whether a row existed."""
+    def delete(self, owner_id: UUID, scan_id: UUID) -> bool:
         try:
             with (
-                self._connection() as connection,
-                self._transaction(
-                    connection,
-                    immediate=True,
-                ),
+                self._database.connection() as connection,
+                self._database.transaction(connection, immediate=True),
             ):
                 cursor = connection.execute(
-                    "DELETE FROM scans WHERE id = ?",
-                    (str(scan_id),),
+                    "DELETE FROM scans WHERE owner_id = ? AND id = ?",
+                    (str(owner_id), str(scan_id)),
                 )
-                deleted = cursor.rowcount
-            return deleted == 1
-        except (sqlite3.IntegrityError, sqlite3.ProgrammingError):
-            raise
+            return cursor.rowcount == 1
         except (OSError, sqlite3.Error) as error:
             raise ScanStorageUnavailableError() from error
 
-    def clear(self) -> int:
-        """Delete every saved scan in one write transaction."""
+    def clear(self, owner_id: UUID) -> int:
         try:
             with (
-                self._connection() as connection,
-                self._transaction(
-                    connection,
-                    immediate=True,
-                ),
+                self._database.connection() as connection,
+                self._database.transaction(connection, immediate=True),
             ):
-                total = int(connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0])
-                connection.execute("DELETE FROM scans")
+                total = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM scans WHERE owner_id = ?",
+                        (str(owner_id),),
+                    ).fetchone()[0]
+                )
+                connection.execute("DELETE FROM scans WHERE owner_id = ?", (str(owner_id),))
             return total
-        except (sqlite3.IntegrityError, sqlite3.ProgrammingError):
-            raise
         except (OSError, sqlite3.Error) as error:
             raise ScanStorageUnavailableError() from error
 
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = self._connection_factory(
-            str(self._database_path),
-            timeout=self._busy_timeout_ms / 1_000,
-            isolation_level=None,
-        )
+    def legacy_count(self) -> int:
         try:
-            connection.row_factory = sqlite3.Row
-            connection.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA synchronous = FULL")
-            if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
-                raise ScanStorageUnavailableError()
-            if connection.execute("PRAGMA synchronous").fetchone()[0] != 2:
-                raise ScanStorageUnavailableError()
-            connection.create_function("casefold", 1, _casefold, deterministic=True)
-            yield connection
-        finally:
-            connection.close()
+            with self._database.connection() as connection, self._database.transaction(connection):
+                return int(connection.execute("SELECT COUNT(*) FROM legacy_scans").fetchone()[0])
+        except (OSError, sqlite3.Error) as error:
+            raise ScanStorageUnavailableError() from error
 
-    @contextmanager
-    def _transaction(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        immediate: bool = False,
-    ) -> Iterator[None]:
-        connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    def claim_legacy(self, owner_id: UUID) -> int:
+        """Copy and delete all legacy rows in one BEGIN IMMEDIATE transaction."""
         try:
-            yield
-        except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
+            with (
+                self._database.connection() as connection,
+                self._database.transaction(connection, immediate=True),
+            ):
+                total = int(connection.execute("SELECT COUNT(*) FROM legacy_scans").fetchone()[0])
+                connection.execute(
+                    """
+                    INSERT INTO scans (
+                        id, owner_id, filename, scanned_at, text, classification,
+                        analysis_confidence, summary, provider, tags_json,
+                        fields_json, ocr_json
+                    )
+                    SELECT
+                        id, ?, filename, scanned_at, text, classification,
+                        analysis_confidence, summary, provider, tags_json,
+                        fields_json, ocr_json
+                    FROM legacy_scans
+                    """,
+                    (str(owner_id),),
+                )
+                connection.execute("DELETE FROM legacy_scans")
+                remaining = int(
+                    connection.execute("SELECT COUNT(*) FROM legacy_scans").fetchone()[0]
+                )
+                if remaining != 0:
+                    raise ScanStorageUnavailableError()
+            return total
+        except ScanStorageUnavailableError:
             raise
-        else:
-            connection.commit()
-
-    @staticmethod
-    def _run_quick_check(connection: sqlite3.Connection) -> None:
-        rows = connection.execute("PRAGMA quick_check").fetchall()
-        if len(rows) != 1 or str(rows[0][0]).casefold() != "ok":
-            raise ScanStorageUnavailableError()
+        except (OSError, sqlite3.Error) as error:
+            raise ScanStorageUnavailableError() from error
 
     @staticmethod
     def _build_filters(
         *,
+        owner_id: UUID,
         query: str | None,
         classification: ScanClassificationFilter | None,
     ) -> tuple[str, dict[str, Any]]:
-        filters: list[str] = []
-        parameters: dict[str, Any] = {}
-
+        filters = ["owner_id = :owner_id"]
+        parameters: dict[str, Any] = {"owner_id": str(owner_id)}
         if query is not None:
             filters.append(
                 """
@@ -331,14 +241,12 @@ class SQLiteScanRepository:
                 """
             )
             parameters["query"] = query
-
         if classification == "unclassified":
             filters.append("classification IS NULL")
         elif classification is not None:
             filters.append("classification = :classification")
             parameters["classification"] = classification.value
-
-        return (" WHERE " + " AND ".join(filters) if filters else ""), parameters
+        return " WHERE " + " AND ".join(filters), parameters
 
     @staticmethod
     def _map_row(row: sqlite3.Row) -> ScanDetail:
@@ -352,11 +260,11 @@ class SQLiteScanRepository:
                 tags=json.loads(row["tags_json"]),
                 fields=json.loads(row["fields_json"]),
             )
-
-        ocr = None
-        if row["ocr_json"] is not None:
-            ocr = ScanOcrSnapshot.model_validate(json.loads(row["ocr_json"]))
-
+        ocr = (
+            ScanOcrSnapshot.model_validate(json.loads(row["ocr_json"]))
+            if row["ocr_json"] is not None
+            else None
+        )
         return ScanDetail(
             id=UUID(row["id"]),
             filename=row["filename"],

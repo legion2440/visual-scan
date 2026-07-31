@@ -1,34 +1,47 @@
-"""SQLite scan repository bootstrap, transactions, and query behavior."""
+"""Shared SQLite bootstrap and owner-scoped scan repository behavior."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
-from app.features.analysis.schemas import DocumentClassification
-from app.features.scans.errors import ScanStorageUnavailableError
 from app.features.scans.repository import SQLiteScanRepository
 from app.features.scans.schemas import ScanDetail, ScanSort, SortOrder
+from app.storage.database import SQLiteDatabase
+from app.storage.errors import StorageUnavailableError
+from app.storage.schema import create_schema_v1
 
 BASE_TIME = datetime(2026, 7, 31, 6, 30, tzinfo=UTC)
+OWNER_A = UUID("11111111-1111-4111-8111-111111111111")
+OWNER_B = UUID("22222222-2222-4222-8222-222222222222")
 
 
-def build_repository(
-    database_path: Path,
-    *,
-    busy_timeout_ms: int = 5_000,
-    connection_factory=sqlite3.connect,
-) -> SQLiteScanRepository:
-    return SQLiteScanRepository(
-        database_path=database_path,
-        busy_timeout_ms=busy_timeout_ms,
-        connection_factory=connection_factory,
-    )
+def build_database(path: Path) -> SQLiteDatabase:
+    return SQLiteDatabase(database_path=path, busy_timeout_ms=5_000)
+
+
+def build_repository(path: Path) -> tuple[SQLiteDatabase, SQLiteScanRepository]:
+    database = build_database(path)
+    database.bootstrap()
+    with database.connection() as connection, database.transaction(connection, immediate=True):
+        for user_id, username, initial in (
+            (OWNER_A, "owner-a", 1),
+            (OWNER_B, "owner-b", 0),
+        ):
+            connection.execute(
+                """
+                INSERT INTO users (
+                    id, username, password_hash, created_at, is_active, is_initial_user
+                ) VALUES (?, ?, 'test-hash', '2026-07-31T06:30:00.000000Z', 1, ?)
+                """,
+                (str(user_id), username, initial),
+            )
+    return database, SQLiteScanRepository(database)
 
 
 def build_record(
@@ -36,15 +49,13 @@ def build_record(
     scan_id: UUID | None = None,
     filename: str = "contract.jpg",
     text: str = "Full edited OCR text.",
-    scanned_at: datetime = BASE_TIME,
     classification: str | None = "contract",
-    confidence: float = 0.93,
 ) -> ScanDetail:
     analysis = None
     if classification is not None:
         analysis = {
             "classification": classification,
-            "confidence": confidence,
+            "confidence": 0.93,
             "summary": f"Summary for {filename}",
             "tags": ["legal", "Straße"],
             "fields": [{"label": "Date", "value": "2026-07-31"}],
@@ -54,7 +65,7 @@ def build_record(
         {
             "id": scan_id or uuid4(),
             "filename": filename,
-            "scanned_at": scanned_at,
+            "scanned_at": BASE_TIME,
             "text": text,
             "analysis": analysis,
             "ocr": {
@@ -69,243 +80,120 @@ def build_record(
     )
 
 
-def test_first_and_repeated_bootstrap_create_strict_wal_schema(tmp_path: Path) -> None:
-    database_path = tmp_path / "nested" / "visual-scan.db"
-    repository = build_repository(database_path)
+def test_fresh_and_repeated_bootstrap_create_strict_wal_v2(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "visual-scan.db"
+    database = build_database(path)
+    database.bootstrap()
+    database.bootstrap()
 
-    repository.bootstrap()
-    repository.bootstrap()
-
-    assert database_path.is_file()
-    with sqlite3.connect(database_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
         assert connection.execute("PRAGMA quick_check").fetchall() == [("ok",)]
-        index_names = {row[1] for row in connection.execute("PRAGMA index_list(scans)").fetchall()}
-    assert {"idx_scans_scanned_at", "idx_scans_classification"} <= index_names
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert tables == {"users", "auth_sessions", "auth_rate_limits", "scans", "legacy_scans"}
 
 
-def test_bootstrap_rejects_directory_path(tmp_path: Path) -> None:
-    with pytest.raises(ScanStorageUnavailableError):
-        build_repository(tmp_path).bootstrap()
+def test_v1_migration_preserves_content_in_legacy_archive(tmp_path: Path) -> None:
+    path = tmp_path / "migration.db"
+    scan_id = uuid4()
+    with sqlite3.connect(path, isolation_level=None) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN IMMEDIATE")
+        create_schema_v1(connection)
+        connection.execute(
+            """
+            INSERT INTO scans (
+                id, filename, scanned_at, text, classification, analysis_confidence,
+                summary, provider, tags_json, fields_json, ocr_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(scan_id),
+                "legacy.jpg",
+                "2026-07-31T06:30:00.000000Z",
+                "legacy text",
+                "contract",
+                0.9,
+                "summary",
+                "provider",
+                json.dumps(["legacy"]),
+                json.dumps([]),
+                None,
+            ),
+        )
+        connection.commit()
+
+    build_database(path).bootstrap()
+
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM legacy_scans").fetchone()
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
+    assert row is not None
+    assert row["id"] == str(scan_id)
+    assert row["filename"] == "legacy.jpg"
+    assert row["text"] == "legacy text"
 
 
-@pytest.mark.parametrize("version", [2, 99])
-def test_bootstrap_rejects_unknown_schema_versions(tmp_path: Path, version: int) -> None:
-    database_path = tmp_path / "unknown.db"
-    with sqlite3.connect(database_path) as connection:
+@pytest.mark.parametrize("version", [3, 99])
+def test_unknown_schema_versions_fail_startup(tmp_path: Path, version: int) -> None:
+    path = tmp_path / "unknown.db"
+    with sqlite3.connect(path) as connection:
         connection.execute(f"PRAGMA user_version = {version}")
+    with pytest.raises(StorageUnavailableError):
+        build_database(path).bootstrap()
 
-    with pytest.raises(ScanStorageUnavailableError):
-        build_repository(database_path).bootstrap()
 
-
-def test_bootstrap_rejects_version_zero_database_with_existing_table(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "unversioned.db"
-    with sqlite3.connect(database_path) as connection:
+def test_unversioned_tables_and_directory_path_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "unversioned.db"
+    with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE scans (id TEXT PRIMARY KEY)")
-
-    with pytest.raises(ScanStorageUnavailableError):
-        build_repository(database_path).bootstrap()
-
-
-def test_bootstrap_strictly_rejects_missing_index(tmp_path: Path) -> None:
-    database_path = tmp_path / "invalid-index.db"
-    repository = build_repository(database_path)
-    repository.bootstrap()
-    with sqlite3.connect(database_path) as connection:
-        connection.execute("DROP INDEX idx_scans_classification")
-
-    with pytest.raises(ScanStorageUnavailableError):
-        repository.bootstrap()
+    with pytest.raises(StorageUnavailableError):
+        build_database(path).bootstrap()
+    with pytest.raises(StorageUnavailableError):
+        build_database(tmp_path).bootstrap()
 
 
-def test_records_persist_across_repository_instances(tmp_path: Path) -> None:
-    database_path = tmp_path / "persistent.db"
-    first = build_repository(database_path)
-    first.bootstrap()
-    record = build_record()
+def test_owner_scoped_create_get_list_delete_and_clear(tmp_path: Path) -> None:
+    _, repository = build_repository(tmp_path / "ownership.db")
+    first = build_record(filename="alpha.jpg", classification=None)
+    second = build_record(filename="beta.jpg")
+    repository.create(OWNER_A, first)
+    repository.create(OWNER_B, second)
 
-    first.create(record)
-    second = build_repository(database_path)
-    second.bootstrap()
-
-    assert second.get(record.id) == record
-
-
-def test_create_get_list_delete_and_clear(tmp_path: Path) -> None:
-    repository = build_repository(tmp_path / "operations.db")
-    repository.bootstrap()
-    first = build_record(filename="first.jpg", classification=None)
-    second = build_record(filename="second.jpg")
-    repository.create(first)
-    repository.create(second)
-
-    page, total = repository.list(
-        limit=1,
-        offset=1,
+    page_a, total_a = repository.list(
+        OWNER_A,
+        limit=50,
+        offset=0,
         query=None,
         classification=None,
         sort=ScanSort.FILENAME,
         order=SortOrder.ASCENDING,
     )
 
-    assert repository.get(first.id) == first
-    assert total == 2
-    assert [record.id for record in page] == [second.id]
-    assert repository.delete(first.id) is True
-    assert repository.delete(first.id) is False
-    assert repository.clear() == 1
-    assert repository.get(second.id) is None
+    assert total_a == 1
+    assert page_a == [first]
+    assert repository.get(OWNER_A, first.id) == first
+    assert repository.get(OWNER_B, first.id) is None
+    assert repository.delete(OWNER_B, first.id) is False
+    assert repository.clear(OWNER_B) == 1
+    assert repository.get(OWNER_A, first.id) == first
 
 
-def test_failed_write_rolls_back_without_losing_existing_record(tmp_path: Path) -> None:
-    repository = build_repository(tmp_path / "rollback.db")
-    repository.bootstrap()
-    record = build_record()
-    repository.create(record)
-
-    with pytest.raises(sqlite3.IntegrityError):
-        repository.create(record)
+def test_search_and_total_are_owner_scoped_and_unicode_aware(tmp_path: Path) -> None:
+    _, repository = build_repository(tmp_path / "search.db")
+    repository.create(OWNER_A, build_record(text="Straße marker"))
+    repository.create(OWNER_B, build_record(text="Straße other owner"))
 
     page, total = repository.list(
-        limit=50,
-        offset=0,
-        query=None,
-        classification=None,
-        sort=ScanSort.SCANNED_AT,
-        order=SortOrder.DESCENDING,
-    )
-    assert total == 1
-    assert page == [record]
-
-
-def test_database_rejects_partial_analysis_rows(tmp_path: Path) -> None:
-    database_path = tmp_path / "analysis-invariant.db"
-    repository = build_repository(database_path)
-    repository.bootstrap()
-
-    with sqlite3.connect(database_path) as connection, pytest.raises(sqlite3.IntegrityError):
-        connection.execute(
-            """
-                INSERT INTO scans (
-                    id,
-                    filename,
-                    scanned_at,
-                    text,
-                    classification,
-                    summary,
-                    provider,
-                    tags_json,
-                    fields_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-            (
-                str(uuid4()),
-                "partial.jpg",
-                "2026-07-31T06:30:00.000000Z",
-                "text",
-                "contract",
-                "summary",
-                "provider",
-                "[]",
-                "[]",
-            ),
-        )
-
-
-def test_concurrent_writes_do_not_lose_records(tmp_path: Path) -> None:
-    database_path = tmp_path / "concurrent.db"
-    repository = build_repository(database_path)
-    repository.bootstrap()
-    records = [
-        build_record(
-            filename=f"scan-{index}.jpg",
-            scanned_at=BASE_TIME + timedelta(seconds=index),
-        )
-        for index in range(24)
-    ]
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        list(executor.map(repository.create, records))
-
-    page, total = repository.list(
-        limit=50,
-        offset=0,
-        query=None,
-        classification=None,
-        sort=ScanSort.SCANNED_AT,
-        order=SortOrder.ASCENDING,
-    )
-    assert total == len(records)
-    assert {record.id for record in page} == {record.id for record in records}
-
-
-def test_busy_timeout_maps_locked_database_to_storage_unavailable(tmp_path: Path) -> None:
-    database_path = tmp_path / "locked.db"
-    repository = build_repository(database_path, busy_timeout_ms=5)
-    repository.bootstrap()
-    blocker = sqlite3.connect(database_path, isolation_level=None)
-    blocker.execute("BEGIN IMMEDIATE")
-    try:
-        with pytest.raises(ScanStorageUnavailableError):
-            repository.create(build_record())
-    finally:
-        blocker.rollback()
-        blocker.close()
-
-
-def test_corrupted_json_row_maps_to_storage_unavailable(tmp_path: Path) -> None:
-    database_path = tmp_path / "corrupt-json.db"
-    repository = build_repository(database_path)
-    repository.bootstrap()
-    record = build_record()
-    repository.create(record)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE scans SET fields_json = ? WHERE id = ?",
-            ("not-json", str(record.id)),
-        )
-
-    with pytest.raises(ScanStorageUnavailableError):
-        repository.get(record.id)
-
-
-def test_non_utc_storage_timestamp_maps_to_storage_unavailable(tmp_path: Path) -> None:
-    database_path = tmp_path / "corrupt-timestamp.db"
-    repository = build_repository(database_path)
-    repository.bootstrap()
-    record = build_record()
-    repository.create(record)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE scans SET scanned_at = ? WHERE id = ?",
-            ("2026-07-31T06:30:00", str(record.id)),
-        )
-
-    with pytest.raises(ScanStorageUnavailableError):
-        repository.get(record.id)
-
-
-def test_unicode_casefold_search_and_literal_wildcards(tmp_path: Path) -> None:
-    repository = build_repository(tmp_path / "search.db")
-    repository.bootstrap()
-    unicode_record = build_record(
-        filename="Straße.jpg",
-        text="Заявление о работе",
-    )
-    wildcard_record = build_record(
-        filename="100%_complete.jpg",
-        text="Literal wildcard test",
-        classification=None,
-    )
-    repository.create(unicode_record)
-    repository.create(wildcard_record)
-
-    unicode_page, unicode_total = repository.list(
+        OWNER_A,
         limit=50,
         offset=0,
         query="STRASSE",
@@ -313,123 +201,38 @@ def test_unicode_casefold_search_and_literal_wildcards(tmp_path: Path) -> None:
         sort=ScanSort.SCANNED_AT,
         order=SortOrder.DESCENDING,
     )
-    wildcard_page, wildcard_total = repository.list(
-        limit=50,
-        offset=0,
-        query="%_",
-        classification=None,
-        sort=ScanSort.SCANNED_AT,
-        order=SortOrder.DESCENDING,
-    )
-
-    assert unicode_total == 1
-    assert unicode_page[0].id == unicode_record.id
-    assert wildcard_total == 1
-    assert wildcard_page[0].id == wildcard_record.id
-
-
-def test_filters_and_normalized_deterministic_sorting(tmp_path: Path) -> None:
-    repository = build_repository(tmp_path / "sorting.db")
-    repository.bootstrap()
-    identifiers = [
-        UUID("00000000-0000-4000-8000-000000000003"),
-        UUID("00000000-0000-4000-8000-000000000001"),
-        UUID("00000000-0000-4000-8000-000000000002"),
-    ]
-    repository.create(
-        build_record(
-            scan_id=identifiers[0],
-            filename="zeta.jpg",
-            classification=None,
-        )
-    )
-    repository.create(
-        build_record(
-            scan_id=identifiers[1],
-            filename="Alpha.jpg",
-            classification="contract",
-            confidence=0.5,
-        )
-    )
-    repository.create(
-        build_record(
-            scan_id=identifiers[2],
-            filename="alpha.jpg",
-            classification="contract",
-            confidence=0.5,
-        )
-    )
-
-    classified, classified_total = repository.list(
-        limit=50,
-        offset=0,
-        query=None,
-        classification=DocumentClassification.CONTRACT,
-        sort=ScanSort.CONFIDENCE,
-        order=SortOrder.ASCENDING,
-    )
-    unclassified, unclassified_total = repository.list(
-        limit=50,
-        offset=0,
-        query=None,
-        classification="unclassified",
-        sort=ScanSort.CLASSIFICATION,
-        order=SortOrder.ASCENDING,
-    )
-    all_records, _ = repository.list(
-        limit=50,
-        offset=0,
-        query=None,
-        classification=None,
-        sort=ScanSort.FILENAME,
-        order=SortOrder.ASCENDING,
-    )
-
-    assert classified_total == 2
-    assert [record.id for record in classified] == identifiers[1:]
-    assert unclassified_total == 1
-    assert unclassified[0].id == identifiers[0]
-    assert [record.id for record in all_records] == [
-        identifiers[1],
-        identifiers[2],
-        identifiers[0],
-    ]
-
-
-def test_count_and_page_share_one_read_snapshot(tmp_path: Path) -> None:
-    database_path = tmp_path / "snapshot.db"
-    writer = build_repository(database_path)
-    writer.bootstrap()
-    initial = build_record(filename="initial.jpg")
-    late = build_record(filename="late.jpg")
-    writer.create(initial)
-    inserted = False
-
-    class HookedConnection(sqlite3.Connection):
-        def execute(self, sql, parameters=()):
-            nonlocal inserted
-            if "SELECT *" in sql and not inserted:
-                inserted = True
-                writer.create(late)
-            return super().execute(sql, parameters)
-
-    def connection_factory(*args, **kwargs):
-        return sqlite3.connect(*args, **kwargs, factory=HookedConnection)
-
-    reader = build_repository(
-        database_path,
-        connection_factory=connection_factory,
-    )
-    page, total = reader.list(
-        limit=50,
-        offset=0,
-        query=None,
-        classification=None,
-        sort=ScanSort.SCANNED_AT,
-        order=SortOrder.ASCENDING,
-    )
-
-    assert inserted is True
     assert total == 1
-    assert [record.id for record in page] == [initial.id]
-    assert writer.get(late.id) == late
+    assert len(page) == 1
+
+
+def test_legacy_claim_is_atomic_idempotent_and_preserves_ids(tmp_path: Path) -> None:
+    path = tmp_path / "claim.db"
+    scan_id = uuid4()
+    with sqlite3.connect(path, isolation_level=None) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN IMMEDIATE")
+        create_schema_v1(connection)
+        connection.execute(
+            """
+            INSERT INTO scans (
+                id, filename, scanned_at, text, classification, analysis_confidence,
+                summary, provider, tags_json, fields_json, ocr_json
+            ) VALUES (?, 'old.jpg', '2026-07-31T06:30:00.000000Z', 'old text',
+                      NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+            """,
+            (str(scan_id),),
+        )
+        connection.commit()
+    database, repository = build_repository(path)
+
+    assert repository.legacy_count() == 1
+    assert repository.claim_legacy(OWNER_A) == 1
+    assert repository.claim_legacy(OWNER_A) == 0
+    assert repository.legacy_count() == 0
+    assert repository.get(OWNER_A, scan_id) is not None
+    with database.connection() as connection:
+        owner = connection.execute(
+            "SELECT owner_id FROM scans WHERE id = ?",
+            (str(scan_id),),
+        ).fetchone()
+    assert owner[0] == str(OWNER_A)

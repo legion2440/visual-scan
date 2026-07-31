@@ -217,3 +217,20 @@ class ScanClearResponse(BaseModel):
     """Number of records deleted by archive cleanup."""
 
     deleted: int = Field(ge=0)
+
+
+class LegacyScanStatus(BaseModel):
+    """Count and availability of records created before authentication."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    count: int = Field(ge=0)
+    claimable: bool
+
+
+class LegacyClaimResponse(BaseModel):
+    """Number of legacy records atomically assigned to the initial user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claimed: int = Field(ge=0)

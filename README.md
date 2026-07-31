@@ -1,9 +1,9 @@
 # Visual Scan
 
-Visual Scan combines a standalone Vanilla JavaScript document-scanning
-frontend with a FastAPI backend. The frontend accepts a
-document image or camera capture, lets the user prepare the page on a
-`<canvas>`, and extracts editable text with Tesseract.js in the browser.
+Visual Scan combines a Vanilla JavaScript document-scanning frontend with a
+FastAPI backend. The frontend accepts an image, camera capture, or PDF. Images
+keep the interactive `<canvas>` workflow and can use either local Tesseract.js
+or server Tesseract; PDFs use sequential server OCR.
 
 The backend reports health and provides independent server-side OCR with
 in-memory Pillow preprocessing, PDFium rendering, and the system Tesseract
@@ -14,12 +14,14 @@ metadata. Authentication and Docker are not implemented yet.
 
 ## Features
 
-- JPEG, PNG, and WebP upload through a file picker or drag-and-drop.
+- JPEG, PNG, WebP, and PDF upload through a file picker or drag-and-drop.
 - Camera capture on supported browsers.
 - Canvas preview with 90° rotation, fine deskew, crop, grayscale, threshold,
   and invert controls.
 - Client-side OCR with explicit `fast`, `standard`, and `best` local model
   profiles.
+- Server-side image OCR from the processed Canvas PNG.
+- Server-side PDF OCR with selectable preprocessing and optional password.
 - English, Russian, English + Russian, German, French, and Spanish selections.
 - Editable extracted text.
 - Optional AI analysis through a configurable OpenAI-compatible provider.
@@ -29,28 +31,36 @@ metadata. Authentication and Docker are not implemented yet.
 - Server preprocessing modes: none, grayscale, and binary threshold.
 - SQLite scans API with search, filtering, deterministic sorting, pagination,
   detail retrieval, deletion, and archive cleanup.
-- Local results archive with sorting, search, classification filtering,
-  detail view, deletion, and JSON export.
+- SQLite results archive with sorting, search, fixed classification filtering,
+  pagination, async detail view, deletion, cleanup, and complete JSON export.
+- Explicit export or deletion of legacy `localStorage` results without
+  automatic migration.
 - Two views: **Upload & Scan** and **Scanned Results**.
 
-The current frontend results archive still uses `localStorage`; frontend
-integration with the server archive is reserved for the next step. If browser
-storage quota is reached, Visual Scan retries the new record without its image
-preview. Existing records and previews are never removed automatically.
+New records are saved only through `POST /api/scans`; the frontend never stores
+new thumbnails or scan records in `localStorage`. Records left by older
+versions appear in a separate compatibility banner. They are never mixed with
+server results, migrated, or deleted without an explicit action.
 
 ## Browser OCR and server OCR
 
 | | Browser OCR | Server OCR |
 | --- | --- | --- |
 | Engine | Tesseract.js worker | System Tesseract through pytesseract |
-| Input | Current Canvas image | Multipart JPEG, PNG, WebP, or PDF upload |
-| Preprocessing | Interactive Canvas controls | Requested none, grayscale, or threshold mode |
+| Input | Current processed Canvas | Processed Canvas PNG, or original PDF |
+| Preprocessing | Interactive Canvas controls | Image: already processed; PDF: none, grayscale, or threshold |
 | Models | Local frontend `traineddata` profiles | Languages installed with system Tesseract |
 | Backend required | No | Yes |
 
-The existing frontend continues to use browser OCR and is not yet wired to the
-server OCR endpoints. The two paths are intentionally independent in this
-step.
+For an image, switching engines keeps the same language selection. Browser
+mode also exposes the local model profile; server mode does not claim or infer
+a frontend profile. Server image OCR always uploads the processed Canvas as
+PNG with backend preprocessing set to `none`.
+
+PDFs always select server OCR. The language list is independent of the local
+model manifest, the original `File` is uploaded, threshold is sent only in
+threshold mode, and an empty password is omitted. The password field is
+cleared when a new source is chosen and after successful PDF OCR.
 
 ## OCR model profiles
 
@@ -339,8 +349,16 @@ frontend/config.js
 
 The backend URL defaults to `http://localhost:8000`. Change
 `CONFIG.backendUrl` when the backend runs elsewhere. Every application backend
-request is implemented in `frontend/utils/api.js`. The general request timeout
-is 60 seconds; health uses its separate four-second timeout.
+request is implemented in `frontend/utils/api.js`. Operation deadlines are:
+
+- health: 4 seconds;
+- archive operations: 15 seconds;
+- image OCR and AI analysis: 60 seconds;
+- PDF OCR: 210 seconds.
+
+The transport distinguishes HTTP, network, timeout, and caller-cancelled
+errors. Any HTTP response proves reachability. Network failures and timeouts
+mark the backend unavailable; superseded requests do not alter the indicator.
 
 The environment-neutral OCR registry lives in `frontend/ocrProfiles.js`.
 Browser code and both Node.js setup scripts import it, so profile identifiers,
@@ -350,22 +368,52 @@ between runtime and setup.
 Static OCR assets are intentionally handled by `frontend/utils/ocr.js`:
 `manifest.json` and local traineddata are not backend API requests.
 
+Archive mapping, exact AI-result freshness, storage snapshot limits,
+pagination, reachability transitions, and best-effort export live in the pure
+`frontend/utils/archive.js` module. `frontend/utils/store.js` is limited to
+reading, exporting, and explicitly clearing the legacy browser archive.
+
 ## Input limits and errors
 
 The frontend accepts:
 
-- MIME types `image/jpeg`, `image/png`, and `image/webp`;
-- files up to 20 MB;
+- image MIME types `image/jpeg`, `image/png`, and `image/webp`, up to 20 MB;
+- `application/pdf`, up to 50 MB;
 - decoded images up to 25 megapixels.
 
 The interface reports unsupported formats, oversized or invalid images,
 camera errors, OCR failures, missing model combinations, and an unavailable
 backend. Backend availability does not affect upload, camera capture, Canvas
-preprocessing, browser OCR, or the local results archive.
+preprocessing, browser OCR, editing text, or exporting legacy records.
 
 The backend indicator reports network reachability only. A received HTTP error
 still means the backend is reachable; only a network failure or timeout marks
-it as unavailable. AI request errors are displayed separately.
+it as unavailable. A caller-cancelled stale request changes nothing. AI
+analysis is disabled only when health explicitly reports `ai_available:
+false`; an unknown health state still permits an attempt.
+
+Changing the source, OCR selection, processed image, language, or text
+invalidates dependent results. Server requests are aborted when superseded and
+all OCR, AI, list, detail, delete, and clear responses carry revision guards.
+Browser OCR cannot be cancelled yet, but a late result from an older source is
+ignored.
+
+AI freshness uses the exact raw textarea value together with source revision,
+filename, and language. Whitespace is trimmed only to decide whether the input
+is empty. Saving preserves the raw text and includes AI metadata only while
+that exact snapshot is current. If a provider result exceeds the stricter
+archive tag or field limits, the UI offers an explicit “save without AI
+analysis” choice and never truncates the result.
+
+A successful create or delete is reported before the archive reload. If the
+reload then fails, the mutation remains successful and the UI says so,
+including the new server ID after a create, to avoid accidental duplicates.
+
+Complete server export lists records in fixed `scanned_at asc` order, loads
+full details with concurrency four, and detects total-count drift, duplicate
+IDs, missing records, and request failures. Because the API has no snapshot
+export endpoint, this is best-effort consistency; no file is downloaded when
+drift or a failure is detected.
 
 The server OCR endpoint applies its own configurable byte and pixel limits. It
 also rejects an empty or corrupt upload, an unsupported MIME type, and any
@@ -777,6 +825,7 @@ visual-scan/
 │   │   ├── imageUtils.js
 │   │   ├── ocr.js
 │   │   ├── api.js
+│   │   ├── archive.js
 │   │   └── store.js
 │   ├── index.html
 │   ├── styles.css
@@ -787,7 +836,10 @@ visual-scan/
 │   ├── download-ocr-models.mjs
 │   └── verify-ocr-models.mjs
 ├── tests/
-│   └── ocr.test.mjs
+│   ├── api.test.mjs
+│   ├── archive.test.mjs
+│   ├── ocr.test.mjs
+│   └── store.test.mjs
 ├── public/
 │   └── sample-docs/
 ├── package.json
@@ -815,4 +867,7 @@ visual-scan/
 - `imageUtils.js` contains Canvas image operations.
 - `ocr.js` owns availability, the active Tesseract worker, and OCR progress.
 - `api.js` is the only backend HTTP transport module.
-- `store.js` owns the browser-local results archive, filtering, and sorting.
+- `archive.js` owns pure OCR/archive mapping, freshness, pagination, and
+  complete-export coordination.
+- `store.js` is a compatibility reader/export/clear adapter for legacy
+  browser-only records; it never stores active archive results.

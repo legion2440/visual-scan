@@ -11,15 +11,20 @@ const ocrDataRootUrl = new URL('./assets/tessdata', import.meta.url).href.replac
 
 export const CONFIG = Object.freeze({
   backendUrl: 'http://localhost:8000',
-  requestTimeoutMs: 60_000,
   healthTimeoutMs: 4_000,
+  archiveTimeoutMs: 15_000,
+  imageOcrTimeoutMs: 60_000,
+  aiTimeoutMs: 60_000,
+  pdfOcrTimeoutMs: 210_000,
   maxImageBytes: 20 * 1024 * 1024,
+  maxPdfBytes: 50 * 1024 * 1024,
   maxImagePixels: 25_000_000,
   supportedImageTypes: Object.freeze([
     'image/jpeg',
     'image/png',
     'image/webp',
   ]),
+  supportedPdfType: 'application/pdf',
   ocr: Object.freeze({
     defaultProfile: DEFAULT_OCR_PROFILE,
     dataRootUrl: ocrDataRootUrl,

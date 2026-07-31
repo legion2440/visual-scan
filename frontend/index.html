@@ -25,13 +25,13 @@
   <div class="rule-thick"></div>
   <div class="masthead-row">
     <h1 class="wordmark">Visual&nbsp;Scan</h1>
-    <p class="masthead-sub">Paper in, structured text out — OCR in the browser, with optional AI analysis from the backend.</p>
+    <p class="masthead-sub">Paper in, structured text out — choose browser or server OCR, then save the result to the server archive.</p>
   </div>
   <div class="rule-thin"></div>
   <div class="dateline">
     <span id="dateline-date">—</span>
     <span class="dateline-sep">·</span>
-    <span>Tesseract.js edition</span>
+    <span>Browser + server OCR</span>
     <div class="conn" id="conn">
       <span class="dot" id="conn-dot" data-state="unknown"></span>
       <span id="conn-label">Backend: checking…</span>
@@ -58,12 +58,12 @@
     <div class="col">
       <p class="step">Step one</p>
       <h2>Capture the page</h2>
-      <p class="lede">Drop a photograph or a scan, or take one with the camera. Straighten and clean it up before reading — Tesseract is far more accurate on flat, high-contrast type.</p>
+      <p class="lede">Drop an image or PDF, or take a photograph with the camera. Images keep the full Canvas cleanup workflow; PDFs are read page-by-page by the backend.</p>
 
-      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose an image or drop one here">
-        <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
-        <p class="dropzone-title">Drop an image here</p>
-        <p class="dropzone-sub text-muted">JPEG, PNG, WebP · or <span class="link-like">browse files</span></p>
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose an image or PDF, or drop one here">
+        <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,application/pdf,.pdf" hidden>
+        <p class="dropzone-title">Drop an image or PDF here</p>
+        <p class="dropzone-sub text-muted">JPEG, PNG, WebP, PDF · or <span class="link-like">browse files</span></p>
       </div>
 
       <div class="row row-wrap">
@@ -76,6 +76,13 @@
         <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/contract.jpg">contract</button>
         <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/note.jpg">note</button>
       </div>
+
+      <section class="pdf-card card" id="pdf-card" hidden>
+        <p class="card-kicker">PDF document</p>
+        <p class="card-title" id="pdf-name">—</p>
+        <p class="card-meta" id="pdf-meta">—</p>
+        <p class="card-body">PDF preview and browser OCR are unavailable. The original file is sent to server OCR when you extract text.</p>
+      </section>
 
       <figure class="stage" id="stage" hidden>
         <div class="stage-plate halftone">
@@ -116,6 +123,13 @@
       <div class="run" id="run" hidden>
         <div class="run-row">
           <div class="field field-inline">
+            <label for="sel-engine">OCR engine</label>
+            <select class="input" id="sel-engine">
+              <option value="browser">Browser Tesseract.js</option>
+              <option value="server">Server Tesseract</option>
+            </select>
+          </div>
+          <div class="field field-inline">
             <label for="sel-lang">OCR language</label>
             <select class="input" id="sel-lang"></select>
           </div>
@@ -124,6 +138,24 @@
             <select class="input" id="sel-model"></select>
           </div>
           <button class="btn btn-primary" id="btn-ocr" type="button">Extract text</button>
+        </div>
+        <div class="pdf-options" id="pdf-options" hidden>
+          <div class="field field-inline">
+            <label for="pdf-preprocessing">PDF preprocessing</label>
+            <select class="input" id="pdf-preprocessing">
+              <option value="none">None</option>
+              <option value="grayscale">Grayscale</option>
+              <option value="threshold">Threshold</option>
+            </select>
+          </div>
+          <div class="field field-inline" id="pdf-threshold-field" hidden>
+            <label for="pdf-threshold">Threshold level</label>
+            <input class="input" id="pdf-threshold" type="number" min="0" max="255" value="160">
+          </div>
+          <div class="field field-grow">
+            <label for="pdf-password">PDF password (if required)</label>
+            <input class="input" id="pdf-password" type="password" autocomplete="off">
+          </div>
         </div>
         <p class="model-status text-muted" id="model-status" role="status">
           Checking local OCR models…
@@ -149,9 +181,10 @@
 
       <div class="row row-wrap">
         <button class="btn btn-primary" id="btn-analyze" type="button" disabled>Classify &amp; summarise</button>
-        <button class="btn btn-secondary" id="btn-save" type="button" disabled>Save to results</button>
+        <button class="btn btn-secondary" id="btn-save" type="button" disabled>Save to server archive</button>
         <button class="btn btn-ghost" id="btn-copy" type="button" disabled>Copy text</button>
       </div>
+      <p class="model-status text-muted" id="ai-availability" role="status">AI availability is being checked…</p>
 
       <p class="notice" id="notice" hidden></p>
 
@@ -189,16 +222,27 @@
   <section class="panel" id="panel-results" role="tabpanel" aria-labelledby="tab-results" hidden>
     <div class="results-head">
       <div>
-        <p class="step">Archive</p>
-        <h2>Scanned results</h2>
+        <p class="step">Server archive</p>
+        <h2>Server scan archive</h2>
       </div>
-      <p class="lede results-lede">Every processed document, newest first. Click a column heading to sort; the search box matches filename, text, classification and tags.</p>
+      <p class="lede results-lede">Saved server records with search, classification filters, deterministic sorting and pagination.</p>
     </div>
+
+    <aside class="legacy-banner" id="legacy-banner" hidden>
+      <div>
+        <strong><span id="legacy-count">0</span> legacy browser record(s) found.</strong>
+        They remain separate from the server archive and will not be migrated or deleted automatically.
+      </div>
+      <div class="row row-wrap">
+        <button class="btn btn-secondary" id="btn-legacy-export" type="button">Export legacy JSON</button>
+        <button class="btn btn-ghost btn-danger" id="btn-legacy-clear" type="button">Delete legacy records</button>
+      </div>
+    </aside>
 
     <div class="results-controls">
       <div class="field field-grow">
         <label for="q">Search</label>
-        <input class="input" id="q" type="search" placeholder="Total, invoice, 2026…">
+        <input class="input" id="q" type="search" maxlength="200" placeholder="Total, invoice, 2026…">
       </div>
       <div class="field">
         <label for="filter-class">Classification</label>
@@ -211,6 +255,7 @@
     </div>
 
     <p class="results-count text-muted" id="results-count">0 documents</p>
+    <p class="model-status text-muted" id="results-status" role="status"></p>
 
     <div class="table-wrap">
       <table class="table" id="results-table">
@@ -228,6 +273,19 @@
       </table>
       <p class="empty" id="results-empty">Nothing scanned yet. Start on the <button class="btn btn-ghost" type="button" data-goto="scan">Upload&nbsp;&amp;&nbsp;Scan</button> tab.</p>
     </div>
+    <div class="pagination" id="pagination">
+      <button class="btn btn-secondary" id="page-prev" type="button">Previous</button>
+      <span id="page-label">Page 1 of 1</span>
+      <button class="btn btn-secondary" id="page-next" type="button">Next</button>
+      <div class="field">
+        <label for="page-size">Per page</label>
+        <select class="input" id="page-size">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+        </select>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -241,9 +299,9 @@
       </div>
       <button class="btn btn-ghost" id="detail-close" type="button">Close</button>
     </div>
-    <div class="dialog-body detail-grid">
-      <figure class="detail-figure halftone" id="detail-figure"><img id="detail-img" alt="Scanned page"></figure>
-      <div>
+    <div class="dialog-body">
+      <p class="model-status text-muted" id="detail-status" role="status"></p>
+      <div id="detail-content">
         <div class="card ai-summary">
           <p class="card-kicker">Summary</p>
           <p class="card-body" id="detail-summary">—</p>
@@ -258,7 +316,7 @@
 
 <footer class="footer">
   <div class="rule-thin"></div>
-  <p class="text-muted">Frontend only — vanilla JS, no build step. OCR uses explicitly installed local model files; optional AI analysis uses <code>POST /api/ai/analyze</code>.</p>
+  <p class="text-muted">Vanilla JS, no build step. Browser OCR uses explicitly installed local model files; server OCR, AI analysis and the archive use the FastAPI backend.</p>
 </footer>
 
 <script type="module" src="app.js"></script>

@@ -1,9 +1,9 @@
 /**
- * app.js — Visual Scan frontend.
+ * Visual Scan frontend orchestration.
  *
- * Wiring only: image handling lives in utils/imageUtils.js, OCR in
- * utils/ocr.js, all HTTP in utils/api.js, persistence and table logic in
- * utils/store.js.
+ * Canvas work lives in imageUtils.js, browser OCR in ocr.js, every backend
+ * request in api.js, pure archive rules in archive.js, and pre-Step-7 browser
+ * records behind the explicit legacy adapter in store.js.
  */
 
 import * as IU from './utils/imageUtils.js';
@@ -22,140 +22,280 @@ import {
 } from './utils/ocr.js';
 import { api, ApiError } from './utils/api.js';
 import {
-  store, StorageError, newId, snippet, formatDate, view, classifications,
-} from './utils/store.js';
+  ArchiveContractError,
+  CLASSIFICATIONS,
+  analysisFingerprint,
+  buildScanPayload,
+  collectArchiveForExport,
+  formatDate,
+  listQuery,
+  mapBrowserOcr,
+  mapServerImageOcr,
+  mapServerPdfOcr,
+  nextBackendState,
+  nextPageOffset,
+  offsetAfterDelete,
+  previousPageOffset,
+  snippet,
+} from './utils/archive.js';
+import { legacyStore, StorageError } from './utils/store.js';
 
 const el = (id) => document.getElementById(id);
-const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
 const state = {
-  original: null,          // canvas — the image as loaded
-  base: null,              // canvas — crops baked in
-  rotation: 0,             // 90° steps
-  skew: 0,                 // fine rotation, degrees
+  original: null,
+  base: null,
+  rotation: 0,
+  skew: 0,
   filters: { grayscale: false, threshold: null, invert: false },
-  geom: null,              // canvas — base + rotation + skew (crop source)
-  processed: null,         // canvas — geom + filters (OCR source)
-  display: { w: 0, h: 0, scale: 1 },
+  geom: null,
+  processed: null,
+  display: { w: 0, h: 0, scale: 1, dpr: 1 },
   cropMode: false,
-  cropRect: null,          // display coords
-  file: { name: '', size: 0 },
+  cropRect: null,
+  source: { kind: null, file: null, name: '', size: 0, type: '' },
+  intakeRevision: 0,
+  sourceRevision: 0,
+  ocrEngine: 'browser',
   ocr: null,
-  ai: null,
-  scans: [],
-  sort: { key: 'scanned_at', dir: -1 },
-  backend: 'unknown',      // 'up' | 'down' | 'unknown'
-  ocrManifest: Object.fromEntries(PROFILES.map((profile) => [profile.id, []])),
   ocrBusy: false,
+  ocrRevision: 0,
+  ocrController: null,
+  ocrManifest: Object.fromEntries(PROFILES.map((profile) => [profile.id, []])),
+  ai: null,
+  aiBusy: false,
+  aiRevision: 0,
+  aiController: null,
+  saveBusy: false,
+  backend: 'unknown',
+  health: { status: 'unknown', aiAvailable: null, provider: null },
+  archive: {
+    items: [],
+    total: 0,
+    limit: 50,
+    offset: 0,
+    query: '',
+    classification: 'all',
+    sort: 'scanned_at',
+    order: 'desc',
+    busy: false,
+    error: '',
+    revision: 0,
+    controller: null,
+    mutationRevision: 0,
+    mutationBusy: false,
+    exportBusy: false,
+    detailCache: new Map(),
+  },
+  detail: { id: null, revision: 0, controller: null },
 };
 
-/* ── tabs ─────────────────────────────────────────────────────────────── */
+/* ── tabs and connection ─────────────────────────────────────────────── */
 
 function showPanel(name) {
-  $$('.tab').forEach((t) => {
-    const on = t.dataset.panel === name;
-    t.setAttribute('aria-selected', String(on));
+  $$('.tab').forEach((tab) => {
+    tab.setAttribute('aria-selected', String(tab.dataset.panel === name));
   });
   el('panel-scan').hidden = name !== 'scan';
   el('panel-results').hidden = name !== 'results';
   window.scrollTo({ top: 0 });
+  if (name === 'results') loadArchive({ clearCache: true });
 }
-$$('.tab').forEach((t) => t.addEventListener('click', () => showPanel(t.dataset.panel)));
-document.addEventListener('click', (e) => {
-  const goto = e.target.closest('[data-goto]');
-  if (goto) showPanel(goto.dataset.goto);
+
+$$('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => showPanel(tab.dataset.panel));
+});
+document.addEventListener('click', (event) => {
+  const target = event.target.closest('[data-goto]');
+  if (target) showPanel(target.dataset.goto);
 });
 
-/* ── backend connection ───────────────────────────────────────────────── */
-
 function paintConnection() {
-  const dot = el('conn-dot');
-  const label = el('conn-label');
-  if (state.backend === 'up') {
-    dot.dataset.state = 'up';
-    label.textContent = 'Backend: reachable';
-  } else if (state.backend === 'down') {
-    dot.dataset.state = 'down';
-    label.textContent = 'Backend: unavailable';
-  } else {
-    dot.dataset.state = 'unknown';
-    label.textContent = 'Backend: checking…';
-  }
+  el('conn-dot').dataset.state = state.backend;
+  el('conn-label').textContent = state.backend === 'up'
+    ? 'Backend: reachable'
+    : state.backend === 'down'
+      ? 'Backend: unavailable'
+      : 'Backend: checking…';
 }
 
-function setBackendFromApiError(error) {
-  if (error instanceof ApiError) {
-    state.backend = error.status > 0 ? 'up' : 'down';
+function applyApiReachability(error) {
+  state.backend = nextBackendState(state.backend, error);
+  paintConnection();
+}
+
+function markBackendReachable() {
+  state.backend = 'up';
+  paintConnection();
+}
+
+function paintAiAvailability() {
+  const status = el('ai-availability');
+  if (state.health.aiAvailable === false) {
+    status.textContent = 'AI analysis is not configured on the backend.';
+  } else if (state.health.aiAvailable === true) {
+    status.textContent = state.health.provider
+      ? `AI analysis available · ${state.health.provider}`
+      : 'AI analysis is available.';
+  } else {
+    status.textContent = 'AI availability is unknown; you can still try the request.';
   }
+  syncTextState();
 }
 
 async function checkBackend() {
   state.backend = 'unknown';
   paintConnection();
   try {
-    await api.health();
-    state.backend = 'up';
+    const health = await api.health();
+    markBackendReachable();
+    state.health.status = typeof health?.status === 'string' ? health.status : 'unknown';
+    state.health.aiAvailable = typeof health?.ai_available === 'boolean'
+      ? health.ai_available
+      : null;
+    state.health.provider = typeof health?.provider === 'string' ? health.provider : null;
   } catch (error) {
-    setBackendFromApiError(error);
+    applyApiReachability(error);
+    state.health.status = 'unknown';
+    state.health.aiAvailable = null;
+    state.health.provider = null;
   }
-  paintConnection();
+  paintAiAvailability();
 }
 
 el('conn-test').addEventListener('click', checkBackend);
 
-/* ── image intake ─────────────────────────────────────────────────────── */
+/* ── source lifecycle and intake ─────────────────────────────────────── */
+
+function cancelOcrRequest() {
+  state.ocrRevision += 1;
+  state.ocrController?.abort();
+  state.ocrController = null;
+}
+
+function invalidateAnalysis({ clear = true } = {}) {
+  state.aiRevision += 1;
+  state.aiController?.abort();
+  state.aiController = null;
+  state.aiBusy = false;
+  el('btn-analyze').textContent = 'Classify & summarise';
+  if (clear) {
+    state.ai = null;
+    el('ai').hidden = true;
+  } else {
+    paintAiFreshness();
+  }
+}
+
+function beginNewSource() {
+  state.sourceRevision += 1;
+  cancelOcrRequest();
+  state.ocrBusy = false;
+  state.ocr = null;
+  invalidateAnalysis({ clear: true });
+  el('ocr-text').value = '';
+  el('pdf-password').value = '';
+  hideProgress();
+  syncTextState();
+}
+
+function invalidateProcessedSource() {
+  state.sourceRevision += 1;
+  cancelOcrRequest();
+  state.ocrBusy = false;
+  state.ocr = null;
+  invalidateAnalysis();
+  hideProgress();
+  syncTextState();
+}
 
 const dropzone = el('dropzone');
 dropzone.addEventListener('click', () => el('file-input').click());
-dropzone.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el('file-input').click(); }
+dropzone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    el('file-input').click();
+  }
 });
-['dragenter', 'dragover'].forEach((ev) => dropzone.addEventListener(ev, (e) => {
-  e.preventDefault(); dropzone.classList.add('is-over');
+['dragenter', 'dragover'].forEach((name) => dropzone.addEventListener(name, (event) => {
+  event.preventDefault();
+  dropzone.classList.add('is-over');
 }));
-['dragleave', 'drop'].forEach((ev) => dropzone.addEventListener(ev, () => dropzone.classList.remove('is-over')));
-dropzone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+['dragleave', 'drop'].forEach((name) => dropzone.addEventListener(name, () => {
+  dropzone.classList.remove('is-over');
+}));
+dropzone.addEventListener('drop', (event) => {
+  event.preventDefault();
+  const file = event.dataTransfer.files?.[0];
   if (file) loadFile(file);
   else notice('No file was selected.', 'error');
 });
-el('file-input').addEventListener('change', (e) => {
-  const file = e.target.files && e.target.files[0];
+el('file-input').addEventListener('change', (event) => {
+  const file = event.target.files?.[0];
   if (file) loadFile(file);
   else notice('No file was selected.', 'error');
-  e.target.value = '';
+  event.target.value = '';
 });
-$$('.sample').forEach((b) => b.addEventListener('click', () => loadSample(b.dataset.src, b.textContent.trim())));
+$$('.sample').forEach((button) => {
+  button.addEventListener('click', () => loadSample(button.dataset.src, button.textContent.trim()));
+});
 
 async function loadFile(file) {
-  if (!file) return notice('No file was selected.', 'error');
+  if (!file) {
+    notice('No file was selected.', 'error');
+    return;
+  }
+  const intakeRevision = ++state.intakeRevision;
+  if (file.type === CONFIG.supportedPdfType) {
+    if (file.size > CONFIG.maxPdfBytes) {
+      notice(`That PDF is too large. The maximum file size is ${formatMegabytes(CONFIG.maxPdfBytes)}.`, 'error');
+      return;
+    }
+    if (intakeRevision === state.intakeRevision) adoptPdf(file);
+    return;
+  }
   if (!CONFIG.supportedImageTypes.includes(file.type)) {
-    return notice('Unsupported format. Choose a JPEG, PNG, or WebP image.', 'error');
+    notice('Unsupported format. Choose a JPEG, PNG, WebP, or PDF file.', 'error');
+    return;
   }
   if (file.size > CONFIG.maxImageBytes) {
-    return notice(`That image is too large. The maximum file size is ${formatMegabytes(CONFIG.maxImageBytes)}.`, 'error');
+    notice(`That image is too large. The maximum file size is ${formatMegabytes(CONFIG.maxImageBytes)}.`, 'error');
+    return;
   }
   try {
-    const img = await IU.fileToImage(file);
-    adoptImage(img, { name: file.name, size: file.size });
-  } catch (err) {
-    notice(err.message, 'error');
+    const image = await IU.fileToImage(file);
+    if (intakeRevision !== state.intakeRevision) return;
+    adoptImage(image, {
+      file,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    });
+  } catch (error) {
+    notice(error.message || 'Could not decode this image.', 'error');
   }
 }
 
 async function loadSample(src, label) {
+  const intakeRevision = ++state.intakeRevision;
   try {
-    const img = await IU.loadImage(src);
-    adoptImage(img, { name: src.split('/').pop(), size: 0 });
+    const image = await IU.loadImage(src);
+    if (intakeRevision !== state.intakeRevision) return;
+    adoptImage(image, {
+      file: null,
+      name: src.split('/').pop(),
+      size: 0,
+      type: 'image/jpeg',
+    });
   } catch {
     notice(`Sample “${label}” is missing from /public/sample-docs/.`, 'error');
   }
 }
 
-function adoptImage(img, file) {
-  const width = img.naturalWidth || img.width;
-  const height = img.naturalHeight || img.height;
+function adoptImage(image, source) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
   if (!width || !height) {
     notice('The selected image has invalid dimensions.', 'error');
     return false;
@@ -170,18 +310,15 @@ function adoptImage(img, file) {
   }
 
   stopCamera();
-  state.original = IU.toCanvas(img);
-  state.base = IU.toCanvas(img);
+  beginNewSource();
+  state.source = { kind: 'image', ...source };
+  state.original = IU.toCanvas(image);
+  state.base = IU.toCanvas(image);
   state.rotation = 0;
   state.skew = 0;
   state.cropRect = null;
   setCropMode(false);
-  state.file = file;
-  state.ocr = null;
-  state.ai = null;
-  el('ai').hidden = true;
-  el('ocr-text').value = '';
-  syncTextState();
+  resetFilterControls();
 
   const tone = IU.analyseTone(state.base);
   el('rng-thresh').value = tone.suggestedThreshold;
@@ -189,24 +326,52 @@ function adoptImage(img, file) {
 
   el('stage').hidden = false;
   el('tools').hidden = false;
+  el('pdf-card').hidden = true;
   el('run').hidden = false;
   render();
-  syncOcrControls();
-  notice(`Loaded ${file.name}. Straighten and clean up, then extract the text.`, 'info');
+  syncSourceControls();
+  notice(`Loaded ${source.name}. Straighten and clean up, then extract the text.`, 'info');
   return true;
 }
 
-/* ── camera ───────────────────────────────────────────────────────────── */
+function adoptPdf(file) {
+  stopCamera();
+  beginNewSource();
+  state.source = {
+    kind: 'pdf',
+    file,
+    name: file.name,
+    size: file.size,
+    type: file.type,
+  };
+  state.original = null;
+  state.base = null;
+  state.geom = null;
+  state.processed = null;
+  state.ocrEngine = 'server';
+  el('sel-engine').value = 'server';
+  el('stage').hidden = true;
+  el('tools').hidden = true;
+  el('pdf-card').hidden = false;
+  el('pdf-name').textContent = file.name;
+  el('pdf-meta').textContent = `${formatMegabytes(file.size)} · original PDF`;
+  el('run').hidden = false;
+  syncSourceControls();
+  notice(`Loaded ${file.name}. PDF OCR runs on the backend and may take several minutes.`, 'info');
+}
+
+/* ── camera ──────────────────────────────────────────────────────────── */
 
 let stream = null;
 
 el('btn-camera').addEventListener('click', async () => {
   try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('Camera capture is not supported by this browser.');
     }
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } }, audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
+      audio: false,
     });
     const video = el('video');
     video.srcObject = stream;
@@ -231,17 +396,29 @@ el('btn-shoot').addEventListener('click', () => {
     notice('The camera is not ready yet. Wait a moment and try again.', 'error');
     return;
   }
-  const c = IU.makeCanvas(video.videoWidth, video.videoHeight);
-  c.getContext('2d').drawImage(video, 0, 0);
+  const canvas = IU.makeCanvas(video.videoWidth, video.videoHeight);
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  const intakeRevision = ++state.intakeRevision;
   const shot = new Image();
-  shot.onload = () => adoptImage(shot, { name: `camera-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.jpg`, size: 0 });
-  shot.src = c.toDataURL('image/jpeg', 0.95);
+  shot.onload = () => {
+    if (intakeRevision !== state.intakeRevision) return;
+    adoptImage(shot, {
+      file: null,
+      name: `camera-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.jpg`,
+      size: 0,
+      type: 'image/jpeg',
+    });
+  };
+  shot.src = canvas.toDataURL('image/jpeg', 0.95);
 });
 
 el('btn-camera-stop').addEventListener('click', stopCamera);
 
 function stopCamera() {
-  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  if (stream) {
+    stream.getTracks().forEach((track) => track.stop());
+    stream = null;
+  }
   const video = el('video');
   video.srcObject = null;
   video.hidden = true;
@@ -252,105 +429,133 @@ function stopCamera() {
   el('btn-camera').hidden = false;
 }
 
-/* ── preview pipeline ─────────────────────────────────────────────────── */
+/* ── Canvas preview and image tools ──────────────────────────────────── */
 
 function render() {
   if (!state.base) return;
   state.geom = state.skew
     ? IU.rotateFree(IU.rotate(state.base, state.rotation), state.skew)
     : IU.rotate(state.base, state.rotation);
-
-  const f = state.filters;
   state.processed = IU.preprocess(state.geom, {
-    grayscale: f.grayscale || f.threshold !== null,
-    threshold: f.threshold,
-    invert: f.invert,
-    contrast: f.threshold !== null ? 1 : (f.grayscale ? 1.12 : 1),
+    grayscale: state.filters.grayscale || state.filters.threshold !== null,
+    threshold: state.filters.threshold,
+    invert: state.filters.invert,
+    contrast: state.filters.threshold !== null ? 1 : (state.filters.grayscale ? 1.12 : 1),
   });
-
   drawPreview();
-  const p = state.processed;
+  const suffix = state.filters.threshold !== null
+    ? ` · threshold ${state.filters.threshold}`
+    : state.filters.grayscale
+      ? ' · grayscale'
+      : '';
   el('stage-caption').textContent =
-    `${state.file.name} · ${p.width}×${p.height}px${f.threshold !== null ? ` · threshold ${f.threshold}` : f.grayscale ? ' · grayscale' : ''}`;
+    `${state.source.name} · ${state.processed.width}×${state.processed.height}px${suffix}`;
 }
 
 function drawPreview() {
   const canvas = el('preview');
-  const plate = canvas.parentElement;
-  const maxW = plate.clientWidth || 520;
-  const box = IU.fitContain(state.processed.width, state.processed.height, maxW, 480);
+  const maxWidth = canvas.parentElement.clientWidth || 520;
+  const box = IU.fitContain(state.processed.width, state.processed.height, maxWidth, 480);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-
-  for (const c of [canvas, el('overlay')]) {
-    c.style.width = `${box.w}px`;
-    c.style.height = `${box.h}px`;
-    c.width = Math.round(box.w * dpr);
-    c.height = Math.round(box.h * dpr);
+  for (const item of [canvas, el('overlay')]) {
+    item.style.width = `${box.w}px`;
+    item.style.height = `${box.h}px`;
+    item.width = Math.round(box.w * dpr);
+    item.height = Math.round(box.h * dpr);
   }
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, box.w, box.h);
-  ctx.drawImage(state.processed, 0, 0, box.w, box.h);
-
-  state.display = { w: box.w, h: box.h, scale: state.processed.width / box.w, dpr };
+  const context = canvas.getContext('2d');
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, box.w, box.h);
+  context.drawImage(state.processed, 0, 0, box.w, box.h);
+  state.display = {
+    w: box.w,
+    h: box.h,
+    scale: state.processed.width / box.w,
+    dpr,
+  };
   drawOverlay();
 }
 
 function drawOverlay() {
-  const c = el('overlay');
+  const canvas = el('overlay');
   const { w, h, dpr } = state.display;
-  const ctx = c.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
+  const context = canvas.getContext('2d');
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, w, h);
   if (!state.cropMode || !state.cropRect) return;
-  const r = state.cropRect;
-  ctx.fillStyle = 'rgba(32,30,29,0.55)';
-  ctx.fillRect(0, 0, w, h);
-  ctx.clearRect(r.x, r.y, r.w, r.h);
-  ctx.strokeStyle = '#0088b0';
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+  const rect = state.cropRect;
+  context.fillStyle = 'rgba(32,30,29,0.55)';
+  context.fillRect(0, 0, w, h);
+  context.clearRect(rect.x, rect.y, rect.w, rect.h);
+  context.strokeStyle = '#0088b0';
+  context.lineWidth = 1.5;
+  context.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
 }
 
-window.addEventListener('resize', () => { if (state.processed) drawPreview(); });
+window.addEventListener('resize', () => {
+  if (state.processed) drawPreview();
+});
 
-/* ── tools ────────────────────────────────────────────────────────────── */
-
-el('btn-rot-l').addEventListener('click', () => { state.rotation = (state.rotation + 270) % 360; state.cropRect = null; render(); });
-el('btn-rot-r').addEventListener('click', () => { state.rotation = (state.rotation + 90) % 360; state.cropRect = null; render(); });
-
-el('rng-skew').addEventListener('input', (e) => {
-  state.skew = Number(e.target.value);
-  el('out-skew').textContent = `${state.skew}°`;
+function changeProcessedImage(change) {
+  if (!state.base) return;
+  invalidateProcessedSource();
+  change();
   state.cropRect = null;
   render();
-});
+  syncOcrControls();
+}
 
-el('chk-gray').addEventListener('change', (e) => { state.filters.grayscale = e.target.checked; render(); });
-el('chk-invert').addEventListener('change', (e) => { state.filters.invert = e.target.checked; render(); });
-el('chk-thresh').addEventListener('change', (e) => {
-  el('rng-thresh').disabled = !e.target.checked;
-  state.filters.threshold = e.target.checked ? Number(el('rng-thresh').value) : null;
-  render();
+el('btn-rot-l').addEventListener('click', () => {
+  changeProcessedImage(() => { state.rotation = (state.rotation + 270) % 360; });
 });
-el('rng-thresh').addEventListener('input', (e) => {
-  el('out-thresh').textContent = e.target.value;
-  if (el('chk-thresh').checked) { state.filters.threshold = Number(e.target.value); render(); }
+el('btn-rot-r').addEventListener('click', () => {
+  changeProcessedImage(() => { state.rotation = (state.rotation + 90) % 360; });
 });
-
+el('rng-skew').addEventListener('input', (event) => {
+  changeProcessedImage(() => {
+    state.skew = Number(event.target.value);
+    el('out-skew').textContent = `${state.skew}°`;
+  });
+});
+el('chk-gray').addEventListener('change', (event) => {
+  changeProcessedImage(() => { state.filters.grayscale = event.target.checked; });
+});
+el('chk-invert').addEventListener('change', (event) => {
+  changeProcessedImage(() => { state.filters.invert = event.target.checked; });
+});
+el('chk-thresh').addEventListener('change', (event) => {
+  changeProcessedImage(() => {
+    el('rng-thresh').disabled = !event.target.checked;
+    state.filters.threshold = event.target.checked ? Number(el('rng-thresh').value) : null;
+  });
+});
+el('rng-thresh').addEventListener('input', (event) => {
+  el('out-thresh').textContent = event.target.value;
+  if (el('chk-thresh').checked) {
+    changeProcessedImage(() => { state.filters.threshold = Number(event.target.value); });
+  }
+});
 el('btn-reset').addEventListener('click', () => {
   if (!state.original) return;
-  state.base = IU.toCanvas(state.original);
-  state.rotation = 0;
-  state.skew = 0;
-  state.cropRect = null;
-  el('rng-skew').value = 0;
-  el('out-skew').textContent = '0°';
-  setCropMode(false);
-  render();
+  changeProcessedImage(() => {
+    state.base = IU.toCanvas(state.original);
+    state.rotation = 0;
+    state.skew = 0;
+    el('rng-skew').value = 0;
+    el('out-skew').textContent = '0°';
+    setCropMode(false);
+  });
 });
 
-/* crop selection on the overlay */
+function resetFilterControls() {
+  state.filters = { grayscale: false, threshold: null, invert: false };
+  el('chk-gray').checked = false;
+  el('chk-thresh').checked = false;
+  el('chk-invert').checked = false;
+  el('rng-thresh').disabled = true;
+  el('rng-skew').value = 0;
+  el('out-skew').textContent = '0°';
+}
 
 function setCropMode(on) {
   state.cropMode = on;
@@ -363,66 +568,74 @@ function setCropMode(on) {
 }
 
 el('btn-crop').addEventListener('click', () => setCropMode(!state.cropMode));
-
 el('btn-crop-apply').addEventListener('click', () => {
   if (!state.cropRect) return;
-  const s = state.display.scale;
-  const r = state.cropRect;
-  state.base = IU.crop(state.geom, { x: r.x * s, y: r.y * s, w: r.w * s, h: r.h * s });
-  state.rotation = 0;
-  state.skew = 0;
-  el('rng-skew').value = 0;
-  el('out-skew').textContent = '0°';
-  setCropMode(false);
-  render();
+  const scale = state.display.scale;
+  const rect = state.cropRect;
+  changeProcessedImage(() => {
+    state.base = IU.crop(state.geom, {
+      x: rect.x * scale,
+      y: rect.y * scale,
+      w: rect.w * scale,
+      h: rect.h * scale,
+    });
+    state.rotation = 0;
+    state.skew = 0;
+    el('rng-skew').value = 0;
+    el('out-skew').textContent = '0°';
+    setCropMode(false);
+  });
   notice('Cropped. “Reset image” brings the original back.', 'info');
 });
 
 (function bindCropDrag() {
   const overlay = el('overlay');
   let start = null;
-  const pos = (e) => {
-    const b = overlay.getBoundingClientRect();
+  const pointerPosition = (event) => {
+    const bounds = overlay.getBoundingClientRect();
     return {
-      x: IU.clamp(e.clientX - b.left, 0, b.width),
-      y: IU.clamp(e.clientY - b.top, 0, b.height),
+      x: IU.clamp(event.clientX - bounds.left, 0, bounds.width),
+      y: IU.clamp(event.clientY - bounds.top, 0, bounds.height),
     };
   };
-  overlay.addEventListener('pointerdown', (e) => {
+  overlay.addEventListener('pointerdown', (event) => {
     if (!state.cropMode) return;
-    overlay.setPointerCapture(e.pointerId);
-    start = pos(e);
+    overlay.setPointerCapture(event.pointerId);
+    start = pointerPosition(event);
     state.cropRect = { x: start.x, y: start.y, w: 0, h: 0 };
   });
-  overlay.addEventListener('pointermove', (e) => {
+  overlay.addEventListener('pointermove', (event) => {
     if (!start) return;
-    const p = pos(e);
+    const point = pointerPosition(event);
     state.cropRect = {
-      x: Math.min(start.x, p.x), y: Math.min(start.y, p.y),
-      w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y),
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      w: Math.abs(point.x - start.x),
+      h: Math.abs(point.y - start.y),
     };
     drawOverlay();
   });
   overlay.addEventListener('pointerup', () => {
     start = null;
-    const r = state.cropRect;
-    const ok = r && r.w > 12 && r.h > 12;
-    if (!ok) state.cropRect = null;
-    el('btn-crop-apply').disabled = !ok;
+    const valid = state.cropRect && state.cropRect.w > 12 && state.cropRect.h > 12;
+    if (!valid) state.cropRect = null;
+    el('btn-crop-apply').disabled = !valid;
     drawOverlay();
   });
-})();
+}());
 
-/* ── OCR ──────────────────────────────────────────────────────────────── */
+/* ── OCR controls and execution ──────────────────────────────────────── */
 
 el('sel-model').innerHTML = PROFILES
   .map((profile) => `<option value="${profile.id}">${profile.label}</option>`)
   .join('');
 el('sel-model').value = CONFIG.ocr.defaultProfile;
-el('sel-lang').innerHTML = LANGUAGES.map((l) => `<option value="${l.code}">${l.label}</option>`).join('');
+el('sel-lang').innerHTML = LANGUAGES
+  .map((language) => `<option value="${language.code}">${language.label}</option>`)
+  .join('');
 el('sel-lang').value = 'eng';
 
-function selectedOcrCombinationAvailable() {
+function selectedLocalCombinationAvailable() {
   return isOcrCombinationAvailable(
     state.ocrManifest,
     el('sel-model').value,
@@ -430,59 +643,85 @@ function selectedOcrCombinationAvailable() {
   );
 }
 
-function syncOcrControls() {
-  const available = selectedOcrCombinationAvailable();
-  const anyProfileAvailable = PROFILES.some(
-    (profile) => availableLanguagesForProfile(state.ocrManifest, profile.id).length > 0,
-  );
-  const selectedProfileAvailable = availableLanguagesForProfile(
-    state.ocrManifest,
-    el('sel-model').value,
-  ).length > 0;
-
-  el('sel-model').disabled = state.ocrBusy || !anyProfileAvailable;
-  el('sel-lang').disabled = state.ocrBusy || !selectedProfileAvailable;
-  el('btn-ocr').disabled = state.ocrBusy || !state.processed || !available;
-}
-
 function paintOcrAvailability({ selectFirstLanguage = false } = {}) {
+  const browserMode = state.source.kind !== 'pdf' && state.ocrEngine === 'browser';
   for (const option of el('sel-model').options) {
-    option.disabled = availableLanguagesForProfile(
+    option.disabled = browserMode && availableLanguagesForProfile(
       state.ocrManifest,
       option.value,
     ).length === 0;
   }
 
-  const profileId = el('sel-model').value;
-  const availableLanguages = availableLanguagesForProfile(state.ocrManifest, profileId);
+  const profile = el('sel-model').value;
+  const available = availableLanguagesForProfile(state.ocrManifest, profile);
   if (
-    selectFirstLanguage
-    && !availableLanguages.includes(el('sel-lang').value)
-    && availableLanguages.length
+    browserMode
+    && selectFirstLanguage
+    && available.length
+    && !available.includes(el('sel-lang').value)
   ) {
-    el('sel-lang').value = availableLanguages[0];
+    el('sel-lang').value = available[0];
   }
-
   for (const option of el('sel-lang').options) {
-    option.disabled = !isOcrCombinationAvailable(
-      state.ocrManifest,
-      profileId,
-      option.value,
-    );
+    option.disabled = browserMode
+      ? !isOcrCombinationAvailable(state.ocrManifest, profile, option.value)
+      : false;
   }
 
   const status = el('model-status');
-  if (selectedOcrCombinationAvailable()) {
-    const profile = PROFILES.find((item) => item.id === profileId);
-    const language = LANGUAGES.find((item) => item.code === el('sel-lang').value);
-    status.textContent = `${profile.label} · ${language.label} · local traineddata`;
+  if (!browserMode) {
+    status.textContent = state.source.kind === 'pdf'
+      ? 'PDF OCR uses the original file and system Tesseract on the backend.'
+      : 'Server OCR uses the processed Canvas image and system Tesseract.';
+    status.dataset.state = 'ready';
+  } else if (selectedLocalCombinationAvailable()) {
+    const profileLabel = PROFILES.find((item) => item.id === profile)?.label || profile;
+    const languageLabel = LANGUAGES.find((item) => item.code === el('sel-lang').value)?.label;
+    status.textContent = `${profileLabel} · ${languageLabel} · local traineddata`;
     status.dataset.state = 'ready';
   } else {
     status.textContent = OCR_MODEL_NOT_INSTALLED_MESSAGE;
     status.dataset.state = 'missing';
   }
-
   syncOcrControls();
+}
+
+function syncSourceControls() {
+  const isPdf = state.source.kind === 'pdf';
+  if (isPdf) {
+    state.ocrEngine = 'server';
+    el('sel-engine').value = 'server';
+  }
+  el('sel-engine').disabled = isPdf || state.ocrBusy;
+  el('sel-model').hidden = false;
+  el('sel-model').closest('.field').hidden = !(!isPdf && state.ocrEngine === 'browser');
+  el('pdf-options').hidden = !isPdf;
+  paintOcrAvailability();
+}
+
+function syncOcrControls() {
+  const browserMode = state.source.kind !== 'pdf' && state.ocrEngine === 'browser';
+  const hasSource = state.source.kind === 'pdf'
+    ? Boolean(state.source.file)
+    : Boolean(state.processed);
+  el('sel-engine').disabled = state.source.kind === 'pdf' || state.ocrBusy;
+  el('sel-model').disabled = state.ocrBusy || (
+    browserMode && !PROFILES.some(
+      (profile) => availableLanguagesForProfile(state.ocrManifest, profile.id).length,
+    )
+  );
+  el('sel-lang').disabled = state.ocrBusy || (
+    browserMode && availableLanguagesForProfile(
+      state.ocrManifest,
+      el('sel-model').value,
+    ).length === 0
+  );
+  el('btn-ocr').disabled = state.ocrBusy
+    || !hasSource
+    || (browserMode && !selectedLocalCombinationAvailable());
+  el('pdf-preprocessing').disabled = state.ocrBusy;
+  el('pdf-threshold').disabled = state.ocrBusy;
+  el('pdf-password').disabled = state.ocrBusy;
 }
 
 async function loadOcrModels() {
@@ -491,52 +730,109 @@ async function loadOcrModels() {
   paintOcrAvailability();
 }
 
-async function applyOcrSelectionChange({ profileChanged = false } = {}) {
-  paintOcrAvailability({ selectFirstLanguage: profileChanged });
-  state.ocrBusy = true;
+el('sel-engine').addEventListener('change', async (event) => {
+  cancelOcrRequest();
+  state.ocrBusy = false;
+  state.ocrEngine = event.target.value;
+  state.ocr = null;
+  invalidateAnalysis();
+  syncSourceControls();
+  syncTextState();
+  if (state.ocrEngine === 'server') await shutdown();
+});
+el('sel-model').addEventListener('change', async () => {
+  paintOcrAvailability({ selectFirstLanguage: true });
+  state.ocr = null;
+  invalidateAnalysis();
+  await releaseWorkerForSelection(el('sel-model').value, el('sel-lang').value);
   syncOcrControls();
-  try {
+});
+el('sel-lang').addEventListener('change', async () => {
+  state.ocr = null;
+  invalidateAnalysis();
+  if (state.ocrEngine === 'browser' && state.source.kind !== 'pdf') {
+    paintOcrAvailability();
     await releaseWorkerForSelection(el('sel-model').value, el('sel-lang').value);
-  } finally {
-    state.ocrBusy = false;
+  } else {
     syncOcrControls();
+  }
+  syncTextState();
+});
+el('pdf-preprocessing').addEventListener('change', (event) => {
+  el('pdf-threshold-field').hidden = event.target.value !== 'threshold';
+});
+
+el('btn-ocr').addEventListener('click', runOcr);
+
+async function runOcr() {
+  if (state.source.kind === 'pdf') {
+    await runPdfOcr();
+  } else if (state.ocrEngine === 'server') {
+    await runServerImageOcr();
+  } else {
+    await runBrowserImageOcr();
   }
 }
 
-el('sel-model').addEventListener('change', () => {
-  applyOcrSelectionChange({ profileChanged: true });
-});
-el('sel-lang').addEventListener('change', () => {
-  applyOcrSelectionChange();
-});
+function beginOcr() {
+  cancelOcrRequest();
+  const revision = state.ocrRevision;
+  const sourceRevision = state.sourceRevision;
+  state.ocrBusy = true;
+  state.ocr = null;
+  invalidateAnalysis();
+  syncOcrControls();
+  showProgress(0, 'Preparing OCR…');
+  return { revision, sourceRevision };
+}
 
-el('btn-ocr').addEventListener('click', async () => {
+function ocrRunIsCurrent(run) {
+  return run.revision === state.ocrRevision && run.sourceRevision === state.sourceRevision;
+}
+
+function finishOcr(run) {
+  if (!ocrRunIsCurrent(run)) return;
+  state.ocrBusy = false;
+  state.ocrController = null;
+  hideProgress();
+  syncOcrControls();
+}
+
+function applyOcrText(text, snapshot) {
+  state.ocr = snapshot;
+  el('ocr-text').value = typeof text === 'string' ? text : '';
+  invalidateAnalysis();
+  syncTextState();
+}
+
+async function runBrowserImageOcr() {
   if (!state.processed) {
     notice('Choose an image before starting OCR.', 'error');
     return;
   }
-  const lang = el('sel-lang').value;
+  const run = beginOcr();
+  const language = el('sel-lang').value;
   const profile = el('sel-model').value;
-  state.ocrBusy = true;
-  syncOcrControls();
-  showProgress(0, 'Loading the OCR engine…');
   try {
     const result = await recognize(state.processed, {
-      lang,
+      lang: language,
       profile,
-      onProgress: ({ status, progress }) => showProgress(progress, status),
+      onProgress: ({ status, progress }) => {
+        if (ocrRunIsCurrent(run)) showProgress(progress, status);
+      },
     });
-    state.ocr = result;
-    el('ocr-text').value = result.text;
-    syncTextState();
-    if (!result.text) notice('No text was recognised. Try cropping tighter, or turn on grayscale + threshold.', 'error');
-    else notice(
-      `Recognised ${result.text.split(/\s+/).filter(Boolean).length} words`
-      + `${result.confidence ? ` at ${result.confidence}% confidence` : ''} `
-      + `with ${result.profileLabel} (${result.languageLabel}).`,
-      'ok',
-    );
+    if (!ocrRunIsCurrent(run)) return;
+    applyOcrText(result.text, mapBrowserOcr(result));
+    if (!result.text) {
+      notice('No text was recognised. Try cropping tighter, or turn on grayscale + threshold.', 'error');
+    } else {
+      notice(
+        `Recognised ${result.words} words with ${result.profileLabel} (${result.languageLabel}).`,
+        'ok',
+      );
+    }
   } catch (error) {
+    if (!ocrRunIsCurrent(run)) return;
     notice(
       error instanceof OcrModelError
         ? error.message
@@ -544,283 +840,715 @@ el('btn-ocr').addEventListener('click', async () => {
       'error',
     );
   } finally {
-    state.ocrBusy = false;
-    syncOcrControls();
-    hideProgress();
+    finishOcr(run);
   }
-});
-
-function showProgress(p, label) {
-  el('progress').hidden = false;
-  el('progress-bar').style.width = `${Math.round(IU.clamp(p, 0, 1) * 100)}%`;
-  el('progress-label').textContent = `${label}${p ? ` — ${Math.round(p * 100)}%` : ''}`;
 }
+
+async function processedPngFile() {
+  if (!state.processed) throw new Error('Choose an image before starting OCR.');
+  if (state.processed.width * state.processed.height > CONFIG.maxImagePixels) {
+    throw new Error('The processed image exceeds the pixel limit.');
+  }
+  const blob = await IU.canvasToBlob(state.processed, 'image/png');
+  if (!blob) throw new Error('The browser could not encode the processed image as PNG.');
+  if (blob.size > CONFIG.maxImageBytes) {
+    throw new Error(`The processed PNG exceeds ${formatMegabytes(CONFIG.maxImageBytes)}.`);
+  }
+  const stem = (state.source.name || 'processed').replace(/\.[^.]+$/, '');
+  return new File([blob], `${stem}.png`, { type: 'image/png' });
+}
+
+async function runServerImageOcr() {
+  if (!state.processed) {
+    notice('Choose an image before starting OCR.', 'error');
+    return;
+  }
+  const run = beginOcr();
+  const controller = new AbortController();
+  state.ocrController = controller;
+  showProgress(0, 'Uploading processed image to server OCR…');
+  try {
+    const file = await processedPngFile();
+    if (!ocrRunIsCurrent(run)) return;
+    const result = await api.recognizeImage(file, {
+      language: el('sel-lang').value,
+      signal: controller.signal,
+    });
+    if (!ocrRunIsCurrent(run)) return;
+    markBackendReachable();
+    applyOcrText(result.text, mapServerImageOcr(result));
+    notice(`Server OCR recognised ${result.words} words.`, result.text ? 'ok' : 'error');
+  } catch (error) {
+    if (!ocrRunIsCurrent(run) || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    notice(`Server OCR failed: ${error.message || 'Unknown error.'}`, 'error');
+  } finally {
+    finishOcr(run);
+  }
+}
+
+async function runPdfOcr() {
+  if (!state.source.file) {
+    notice('Choose a PDF before starting OCR.', 'error');
+    return;
+  }
+  const preprocessing = el('pdf-preprocessing').value;
+  const threshold = Number(el('pdf-threshold').value);
+  if (preprocessing === 'threshold' && (!Number.isInteger(threshold) || threshold < 0 || threshold > 255)) {
+    notice('PDF threshold must be a whole number from 0 to 255.', 'error');
+    return;
+  }
+  const run = beginOcr();
+  const controller = new AbortController();
+  state.ocrController = controller;
+  showProgress(0, 'Uploading PDF; OCR runs sequentially by page…');
+  try {
+    const result = await api.recognizePdf(state.source.file, {
+      language: el('sel-lang').value,
+      preprocessing,
+      threshold,
+      password: el('pdf-password').value,
+      signal: controller.signal,
+    });
+    if (!ocrRunIsCurrent(run)) return;
+    markBackendReachable();
+    const mapped = mapServerPdfOcr(result);
+    applyOcrText(result.text, mapped.snapshot);
+    el('pdf-password').value = '';
+    notice(
+      `Server OCR completed ${mapped.pageCount} page${mapped.pageCount === 1 ? '' : 's'} and recognised ${mapped.snapshot.words} words.`,
+      result.text ? 'ok' : 'error',
+    );
+  } catch (error) {
+    if (!ocrRunIsCurrent(run) || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    notice(`PDF OCR failed: ${error.message || 'Unknown error.'}`, 'error');
+  } finally {
+    finishOcr(run);
+  }
+}
+
+function showProgress(progress, label) {
+  el('progress').hidden = false;
+  el('progress-bar').style.width = `${Math.round(IU.clamp(progress, 0, 1) * 100)}%`;
+  el('progress-label').textContent =
+    `${label}${progress ? ` — ${Math.round(progress * 100)}%` : ''}`;
+}
+
 function hideProgress() {
   el('progress').hidden = true;
   el('progress-bar').style.width = '0%';
 }
 
-/* ── text area ────────────────────────────────────────────────────────── */
+/* ── editable text and AI ────────────────────────────────────────────── */
 
-el('ocr-text').addEventListener('input', syncTextState);
+function currentAnalysisContext(text = el('ocr-text').value) {
+  return {
+    sourceRevision: state.sourceRevision,
+    filename: state.source.name || 'untitled',
+    language: el('sel-lang').value,
+    text,
+  };
+}
+
+function paintAiFreshness() {
+  if (!state.ai) return;
+  const current = state.ai.fingerprint === analysisFingerprint(currentAnalysisContext())
+    && state.ai.analyzedText === el('ocr-text').value;
+  const provider = typeof state.ai.result?.provider === 'string'
+    ? state.ai.result.provider.trim()
+    : '';
+  el('ai-source').textContent = `${provider ? `AI provider: ${provider}` : 'AI provider: not reported'}${current ? '' : ' · stale'}`;
+  el('ai-source').className = `tag ${current ? 'tag-accent-2' : 'tag-neutral'}`;
+}
+
+el('ocr-text').addEventListener('input', () => {
+  invalidateAnalysis();
+  syncTextState();
+});
 
 function syncTextState() {
-  const text = el('ocr-text').value.trim();
+  const rawText = el('ocr-text').value;
+  const text = rawText.trim();
   const words = text ? text.split(/\s+/).length : 0;
-  const ocrDetails = state.ocr
+  const details = state.ocr
     ? [
       state.ocr.engine,
-      state.ocr.confidence ? `OCR ${state.ocr.confidence}%` : '',
-      state.ocr.profileLabel,
-      state.ocr.languageLabel,
+      state.ocr.confidence != null ? `OCR ${Math.round(state.ocr.confidence)}%` : '',
+      state.ocr.profile,
+      LANGUAGES.find((item) => item.code === state.ocr.language)?.label || state.ocr.language,
     ].filter(Boolean).join(' · ')
     : '';
   el('text-meta').textContent = text
-    ? `${words} words · ${text.length} characters${ocrDetails ? ` · ${ocrDetails}` : ''}`
+    ? `${words} words · ${rawText.length} characters${details ? ` · ${details}` : ''}`
     : 'no text yet';
-  el('btn-analyze').disabled = !text;
+  el('btn-analyze').disabled = !text
+    || state.aiBusy
+    || state.health.aiAvailable === false;
   el('btn-copy').disabled = !text;
-  el('btn-save').disabled = !text;
+  el('btn-save').disabled = !text || state.saveBusy;
+  paintAiFreshness();
 }
 
 el('btn-copy').addEventListener('click', async () => {
-  await navigator.clipboard.writeText(el('ocr-text').value);
-  notice('Text copied to the clipboard.', 'ok');
+  try {
+    await navigator.clipboard.writeText(el('ocr-text').value);
+    notice('Text copied to the clipboard.', 'ok');
+  } catch {
+    notice('The browser could not copy the text.', 'error');
+  }
 });
 
-/* ── AI analysis ──────────────────────────────────────────────────────── */
-
 el('btn-analyze').addEventListener('click', async () => {
-  const text = el('ocr-text').value.trim();
-  if (!text) {
+  const text = el('ocr-text').value;
+  if (!text.trim()) {
     notice('Extract or enter text before requesting AI analysis.', 'error');
     return;
   }
-  const payload = { filename: state.file.name || 'untitled', text, language: el('sel-lang').value };
-  const btn = el('btn-analyze');
-  btn.disabled = true;
-  btn.textContent = 'Working…';
-  state.ai = null;
-  el('ai').hidden = true;
-  try {
-    const result = await api.analyze(payload);
-    state.backend = 'up';
-    paintConnection();
-    state.ai = result;
-    paintAI(result);
-  } catch (error) {
-    setBackendFromApiError(error);
-    paintConnection();
-    notice(`AI analysis is unavailable: ${error.message} Your image and OCR text are unchanged.`, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Classify & summarise';
-    syncTextState();
-  }
-});
-
-function paintAI(r) {
-  el('ai').hidden = false;
-  const provider = typeof r.provider === 'string' ? r.provider.trim() : '';
-  el('ai-source').textContent = provider ? `AI provider: ${provider}` : 'AI provider: not reported';
-  el('ai-source').className = 'tag tag-accent-2';
-  el('ai-class').textContent = r.classification || 'unclassified';
-  el('ai-conf').textContent = typeof r.confidence === 'number'
-    ? `confidence ${Math.round(r.confidence * 100)}%` : '';
-  el('ai-summary').textContent = r.summary || '—';
-
-  const fields = r.fields || [];
-  el('ai-fields-wrap').hidden = fields.length === 0;
-  el('ai-fields').innerHTML = fields
-    .map((f) => `<div class="field-pair"><dt>${escapeHtml(f.label)}</dt><dd>${escapeHtml(f.value)}</dd></div>`)
-    .join('');
-
-  const tags = r.tags || [];
-  el('ai-tags-wrap').hidden = tags.length === 0;
-  el('ai-tags').innerHTML = tags.map((t) => `<span class="tag tag-accent">${escapeHtml(t)}</span>`).join('');
-}
-
-/* ── saving ───────────────────────────────────────────────────────────── */
-
-function persistScan(scan) {
-  try {
-    return { scans: store.add(scan), savedWithoutThumbnail: false };
-  } catch (error) {
-    if (!(error instanceof StorageError && error.quotaExceeded && scan.thumbnail)) throw error;
-    return {
-      scans: store.add({ ...scan, thumbnail: null }),
-      savedWithoutThumbnail: true,
-    };
-  }
-}
-
-function reportStorageError(error, action) {
-  if (error instanceof StorageError && error.quotaExceeded) {
-    notice('Browser storage is full. Export or clear the archive, then try again.', 'error');
+  if (state.health.aiAvailable === false) {
+    notice('AI analysis is not configured on the backend.', 'error');
     return;
   }
-  notice(`Could not ${action} because browser storage is unavailable. Check its permissions and try again.`, 'error');
+
+  state.aiRevision += 1;
+  const revision = state.aiRevision;
+  state.aiController?.abort();
+  const controller = new AbortController();
+  state.aiController = controller;
+  const context = currentAnalysisContext(text);
+  const fingerprint = analysisFingerprint(context);
+  state.aiBusy = true;
+  syncTextState();
+  el('btn-analyze').textContent = 'Working…';
+
+  try {
+    const result = await api.analyze({
+      filename: context.filename,
+      text,
+      language: context.language,
+    }, { signal: controller.signal });
+    if (
+      revision !== state.aiRevision
+      || fingerprint !== analysisFingerprint(currentAnalysisContext())
+      || text !== el('ocr-text').value
+    ) return;
+    markBackendReachable();
+    state.ai = { result, analyzedText: text, fingerprint };
+    paintAI(result);
+  } catch (error) {
+    if (revision !== state.aiRevision || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    notice(`AI analysis is unavailable: ${error.message} Your OCR text is unchanged.`, 'error');
+  } finally {
+    if (revision === state.aiRevision) {
+      state.aiBusy = false;
+      state.aiController = null;
+      el('btn-analyze').textContent = 'Classify & summarise';
+      syncTextState();
+    }
+  }
+});
+
+function paintAI(result) {
+  el('ai').hidden = false;
+  el('ai-class').textContent = result.classification || 'unclassified';
+  el('ai-conf').textContent = typeof result.confidence === 'number'
+    ? `confidence ${Math.round(result.confidence * 100)}%`
+    : '';
+  el('ai-summary').textContent = result.summary || '—';
+  const fields = Array.isArray(result.fields) ? result.fields : [];
+  el('ai-fields-wrap').hidden = fields.length === 0;
+  el('ai-fields').innerHTML = fields
+    .map((field) => `<div class="field-pair"><dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd></div>`)
+    .join('');
+  const tags = Array.isArray(result.tags) ? result.tags : [];
+  el('ai-tags-wrap').hidden = tags.length === 0;
+  el('ai-tags').innerHTML = tags
+    .map((tag) => `<span class="tag tag-accent">${escapeHtml(tag)}</span>`)
+    .join('');
+  paintAiFreshness();
 }
 
-el('btn-save').addEventListener('click', () => {
-  const text = el('ocr-text').value.trim();
-  if (!text) return;
-  const ai = state.ai || {};
-  const scan = {
-    id: newId(),
-    filename: state.file.name || 'untitled',
-    scanned_at: new Date().toISOString(),
-    text,
-    snippet: snippet(text, 160),
-    classification: ai.classification || 'unclassified',
-    confidence: typeof ai.confidence === 'number' ? ai.confidence : null,
-    summary: ai.summary || '',
-    tags: ai.tags || [],
-    fields: ai.fields || [],
-    ocr: state.ocr ? {
-      engine: state.ocr.engine,
-      lang: state.ocr.lang,
-      languageLabel: state.ocr.languageLabel,
-      profile: state.ocr.profile,
-      profileLabel: state.ocr.profileLabel,
-      confidence: state.ocr.confidence,
-    } : null,
-    thumbnail: state.geom ? IU.makeThumbnail(state.geom, 320) : null,
-  };
+/* ── save to server archive ──────────────────────────────────────────── */
 
+el('btn-save').addEventListener('click', saveCurrentScan);
+
+async function saveCurrentScan() {
+  const text = el('ocr-text').value;
+  if (!text.trim() || state.saveBusy) return;
+  const context = currentAnalysisContext(text);
+  let payload;
   try {
-    const result = persistScan(scan);
-    state.scans = result.scans;
-    renderResults();
-    notice(
-      result.savedWithoutThumbnail
-        ? 'Saved without image preview.'
-        : 'Saved to the local results archive.',
-      'ok',
+    payload = buildScanPayload({
+      filename: state.source.name || 'untitled',
+      text,
+      ai: state.ai,
+      analysisContext: context,
+      ocr: state.ocr,
+    });
+  } catch (error) {
+    if (!(error instanceof ArchiveContractError) || !state.ai) {
+      notice(error.message, 'error');
+      return;
+    }
+    const saveWithoutAnalysis = confirm(
+      `${error.message}\n\nSave this scan without AI analysis? The visible AI result will not be changed.`,
     );
-  } catch (error) {
-    reportStorageError(error, 'save this result');
+    if (!saveWithoutAnalysis) return;
+    payload = buildScanPayload({
+      filename: state.source.name || 'untitled',
+      text,
+      ai: state.ai,
+      analysisContext: context,
+      ocr: state.ocr,
+      omitAnalysis: true,
+    });
   }
-});
 
-/* ── results table ────────────────────────────────────────────────────── */
-
-el('q').addEventListener('input', renderResults);
-el('filter-class').addEventListener('change', renderResults);
-$$('.sortable').forEach((th) => th.addEventListener('click', () => {
-  const key = th.dataset.key;
-  state.sort = state.sort.key === key ? { key, dir: -state.sort.dir } : { key, dir: key === 'scanned_at' ? -1 : 1 };
-  renderResults();
-}));
-
-el('btn-export').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(state.scans, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'scans.json';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-});
-
-el('btn-clear').addEventListener('click', () => {
-  if (!state.scans.length) return;
-  if (!confirm('Remove every saved scan from this browser?')) return;
+  state.saveBusy = true;
+  syncTextState();
+  el('btn-save').textContent = 'Saving…';
   try {
-    const scans = store.clear();
-    state.scans = scans;
-    renderResults();
+    const saved = await api.createScan(payload);
+    markBackendReachable();
+    const savedId = saved?.id || 'unknown ID';
+    notice(`Saved to the server archive as ${savedId}.`, 'ok');
+    const reloaded = await loadArchive({ clearCache: true, quiet: true });
+    if (!reloaded) {
+      notice(
+        `Saved to the server archive as ${savedId}, but the archive view could not be refreshed. Do not save a duplicate; retry the archive reload.`,
+        'error',
+      );
+    }
   } catch (error) {
-    reportStorageError(error, 'clear the archive');
+    applyApiReachability(error);
+    const uncertain = error instanceof ApiError && (
+      ['network', 'timeout'].includes(error.kind)
+      || (error.status >= 200 && error.status < 300)
+    );
+    notice(
+      uncertain
+        ? `The save could not be confirmed: ${error.message} Check the archive before retrying.`
+        : `Could not save this scan: ${error.message}`,
+      'error',
+    );
+  } finally {
+    state.saveBusy = false;
+    el('btn-save').textContent = 'Save to server archive';
+    syncTextState();
   }
+}
+
+/* ── server archive list ─────────────────────────────────────────────── */
+
+el('filter-class').innerHTML = [
+  '<option value="all">All</option>',
+  ...CLASSIFICATIONS.map((classification) => (
+    `<option value="${classification}">${classificationLabel(classification)}</option>`
+  )),
+].join('');
+
+function cancelArchiveList() {
+  state.archive.revision += 1;
+  state.archive.controller?.abort();
+  state.archive.controller = null;
+  state.archive.busy = false;
+}
+
+async function loadArchive({ clearCache = false, quiet = false } = {}) {
+  cancelArchiveList();
+  const revision = state.archive.revision;
+  const controller = new AbortController();
+  state.archive.controller = controller;
+  state.archive.busy = true;
+  state.archive.error = '';
+  if (clearCache) state.archive.detailCache.clear();
+  renderArchive();
+  try {
+    const response = await api.listScans(listQuery(state.archive), {
+      signal: controller.signal,
+    });
+    if (revision !== state.archive.revision) return false;
+    markBackendReachable();
+    if (
+      !response
+      || !Array.isArray(response.items)
+      || !Number.isInteger(response.total)
+      || !Number.isInteger(response.limit)
+      || !Number.isInteger(response.offset)
+    ) {
+      throw new TypeError('The archive list response is invalid.');
+    }
+    state.archive.items = response.items;
+    state.archive.total = response.total;
+    state.archive.limit = response.limit;
+    state.archive.offset = response.offset;
+    return true;
+  } catch (error) {
+    if (revision !== state.archive.revision || error?.kind === 'cancelled') return false;
+    applyApiReachability(error);
+    state.archive.error = `Archive could not be loaded: ${error.message}`;
+    if (!quiet) notice(state.archive.error, 'error');
+    return false;
+  } finally {
+    if (revision === state.archive.revision) {
+      state.archive.busy = false;
+      state.archive.controller = null;
+      renderArchive();
+    }
+  }
+}
+
+let searchTimer = null;
+el('q').addEventListener('input', (event) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.archive.query = event.target.value;
+    state.archive.offset = 0;
+    loadArchive();
+  }, 300);
+});
+el('filter-class').addEventListener('change', (event) => {
+  state.archive.classification = event.target.value;
+  state.archive.offset = 0;
+  loadArchive();
+});
+el('page-size').addEventListener('change', (event) => {
+  state.archive.limit = Number(event.target.value);
+  state.archive.offset = 0;
+  loadArchive();
+});
+el('page-prev').addEventListener('click', () => {
+  state.archive.offset = previousPageOffset(state.archive.offset, state.archive.limit);
+  loadArchive();
+});
+el('page-next').addEventListener('click', () => {
+  state.archive.offset = nextPageOffset(
+    state.archive.offset,
+    state.archive.limit,
+    state.archive.total,
+  );
+  loadArchive();
+});
+$$('.sortable').forEach((heading) => {
+  heading.addEventListener('click', () => {
+    if (state.archive.exportBusy) return;
+    const sort = heading.dataset.key;
+    if (state.archive.sort === sort) {
+      state.archive.order = state.archive.order === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.archive.sort = sort;
+      state.archive.order = sort === 'scanned_at' ? 'desc' : 'asc';
+    }
+    state.archive.offset = 0;
+    loadArchive();
+  });
 });
 
-function renderResults() {
-  const query = el('q').value;
-  const classification = el('filter-class').value;
-
-  const options = ['all', ...classifications(state.scans)];
-  if (el('filter-class').options.length !== options.length) {
-    el('filter-class').innerHTML = options
-      .map((c) => `<option value="${escapeHtml(c)}">${c === 'all' ? 'All' : escapeHtml(c)}</option>`)
-      .join('');
-    el('filter-class').value = options.includes(classification) ? classification : 'all';
-  }
-
-  const rows = view(state.scans, { query, classification: el('filter-class').value, sortKey: state.sort.key, sortDir: state.sort.dir });
-
-  el('tab-count').textContent = state.scans.length;
-  el('results-count').textContent = `${rows.length} of ${state.scans.length} document${state.scans.length === 1 ? '' : 's'}`;
-  el('results-empty').hidden = state.scans.length > 0;
-
-  $$('.sortable').forEach((th) => {
-    th.dataset.dir = th.dataset.key === state.sort.key ? (state.sort.dir === 1 ? 'asc' : 'desc') : '';
+function renderArchive() {
+  const archive = state.archive;
+  const first = archive.total ? archive.offset + 1 : 0;
+  const last = Math.min(archive.offset + archive.items.length, archive.total);
+  el('tab-count').textContent = archive.total;
+  el('results-count').textContent =
+    `${first}–${last} of ${archive.total} document${archive.total === 1 ? '' : 's'}`;
+  el('results-status').textContent = archive.busy
+    ? 'Loading server archive…'
+    : archive.error;
+  el('results-status').dataset.state = archive.error ? 'missing' : 'ready';
+  el('results-empty').hidden = archive.busy || archive.items.length > 0 || Boolean(archive.error);
+  el('btn-clear').disabled = archive.mutationBusy || archive.exportBusy || archive.total === 0;
+  el('btn-export').disabled = archive.exportBusy || archive.total === 0;
+  el('q').disabled = archive.exportBusy;
+  el('filter-class').disabled = archive.exportBusy;
+  el('page-size').disabled = archive.exportBusy;
+  el('page-prev').disabled = archive.busy || archive.exportBusy || archive.offset === 0;
+  el('page-next').disabled = archive.busy
+    || archive.exportBusy
+    || archive.offset + archive.items.length >= archive.total;
+  const pages = Math.max(1, Math.ceil(archive.total / archive.limit));
+  const page = Math.min(pages, Math.floor(archive.offset / archive.limit) + 1);
+  el('page-label').textContent = `Page ${page} of ${pages}`;
+  $$('.sortable').forEach((heading) => {
+    heading.dataset.dir = heading.dataset.key === archive.sort ? archive.order : '';
   });
 
-  el('results-body').innerHTML = rows.map((s) => `
-    <tr data-id="${s.id}">
-      <td class="cell-file">
-        <button class="link-btn" data-act="open" data-id="${s.id}">${escapeHtml(s.filename)}</button>
-        ${s.ocr ? `<span class="cell-sub text-muted">${escapeHtml(s.ocr.engine)} · ${escapeHtml(s.ocr.languageLabel || s.ocr.lang)}${s.ocr.profileLabel || s.ocr.profile ? ` · ${escapeHtml(s.ocr.profileLabel || s.ocr.profile)}` : ''}</span>` : ''}
-      </td>
-      <td class="cell-date">${formatDate(s.scanned_at)}</td>
-      <td class="cell-snippet">${escapeHtml(snippet(s.text, 110))}</td>
-      <td><span class="tag ${s.classification && s.classification !== 'unclassified' ? 'tag-accent' : 'tag-neutral'}">${escapeHtml(s.classification || 'unclassified')}</span></td>
-      <td class="cell-summary">${escapeHtml(snippet(s.summary, 130)) || '<span class="text-muted">—</span>'}</td>
-      <td class="cell-actions">
-        <button class="btn btn-ghost" data-act="open" data-id="${s.id}">View</button>
-        <button class="btn btn-ghost btn-danger" data-act="del" data-id="${s.id}">Delete</button>
-      </td>
-    </tr>`).join('');
+  el('results-body').innerHTML = archive.items.map((scan) => {
+    const analysis = scan.analysis;
+    const ocr = scan.ocr;
+    const classification = analysis?.classification || 'unclassified';
+    const ocrLabel = ocr
+      ? [
+        ocr.source,
+        ocr.engine,
+        LANGUAGES.find((item) => item.code === ocr.language)?.label || ocr.language,
+        ocr.profile,
+      ].filter(Boolean).join(' · ')
+      : '';
+    return `
+      <tr data-id="${escapeHtml(scan.id)}">
+        <td class="cell-file">
+          <button class="link-btn" data-act="open" data-id="${escapeHtml(scan.id)}">${escapeHtml(scan.filename)}</button>
+          ${ocrLabel ? `<span class="cell-sub text-muted">${escapeHtml(ocrLabel)}</span>` : ''}
+        </td>
+        <td class="cell-date">${formatDate(scan.scanned_at)}</td>
+        <td class="cell-snippet">${escapeHtml(scan.snippet || '')}</td>
+        <td><span class="tag ${classification === 'unclassified' ? 'tag-neutral' : 'tag-accent'}">${escapeHtml(classification)}</span></td>
+        <td class="cell-summary">${analysis?.summary ? escapeHtml(snippet(analysis.summary, 130)) : '<span class="text-muted">—</span>'}</td>
+        <td class="cell-actions">
+          <button class="btn btn-ghost" data-act="open" data-id="${escapeHtml(scan.id)}" ${archive.exportBusy ? 'disabled' : ''}>View</button>
+          <button class="btn btn-ghost btn-danger" data-act="delete" data-id="${escapeHtml(scan.id)}" ${archive.exportBusy ? 'disabled' : ''}>Delete</button>
+        </td>
+      </tr>`;
+  }).join('');
 }
 
-el('results-body').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-act]');
-  if (!btn) return;
-  const scan = state.scans.find((s) => s.id === btn.dataset.id);
-  if (!scan) return;
-  if (btn.dataset.act === 'open') return openDetail(scan);
+el('results-body').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-act]');
+  if (!button) return;
+  if (button.dataset.act === 'open') openDetail(button.dataset.id);
+  else deleteScan(button.dataset.id);
+});
+
+async function deleteScan(id) {
+  if (state.archive.mutationBusy || state.archive.exportBusy) return;
+  const scan = state.archive.items.find((item) => item.id === id);
+  if (!confirm(`Delete “${scan?.filename || 'this scan'}” from the server archive?`)) return;
+  cancelArchiveList();
+  state.archive.mutationRevision += 1;
+  const revision = state.archive.mutationRevision;
+  state.archive.mutationBusy = true;
+  renderArchive();
   try {
-    const scans = store.remove(scan.id);
-    state.scans = scans;
-    renderResults();
+    await api.deleteScan(id);
+    if (revision !== state.archive.mutationRevision) return;
+    markBackendReachable();
+    state.archive.detailCache.clear();
+    if (state.detail.id === id) closeDetail();
+    state.archive.offset = offsetAfterDelete(
+      state.archive.offset,
+      state.archive.limit,
+      Math.max(0, state.archive.total - 1),
+    );
+    notice('The scan was deleted from the server archive.', 'ok');
+    const reloaded = await loadArchive({ quiet: true });
+    if (!reloaded) {
+      notice('The scan was deleted, but the archive view could not be refreshed.', 'error');
+    }
   } catch (error) {
-    reportStorageError(error, 'delete this result');
+    if (revision !== state.archive.mutationRevision || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    if (error instanceof ApiError && error.status === 404) {
+      state.archive.detailCache.clear();
+      if (state.detail.id === id) closeDetail();
+      notice('That scan was already absent. Reloading the server archive.', 'info');
+      const reloaded = await loadArchive({ quiet: true });
+      if (!reloaded) {
+        notice('The scan was already absent, but the archive view could not be refreshed.', 'error');
+      }
+      return;
+    }
+    notice(`Could not delete the scan: ${error.message}`, 'error');
+  } finally {
+    if (revision === state.archive.mutationRevision) {
+      state.archive.mutationBusy = false;
+      renderArchive();
+    }
+  }
+}
+
+el('btn-clear').addEventListener('click', async () => {
+  if (!state.archive.total || state.archive.mutationBusy || state.archive.exportBusy) return;
+  if (!confirm(`Delete all ${state.archive.total} records from the server archive?`)) return;
+  cancelArchiveList();
+  state.archive.mutationRevision += 1;
+  const revision = state.archive.mutationRevision;
+  state.archive.mutationBusy = true;
+  renderArchive();
+  try {
+    const response = await api.clearScans();
+    if (revision !== state.archive.mutationRevision) return;
+    markBackendReachable();
+    cancelArchiveList();
+    state.archive.items = [];
+    state.archive.total = 0;
+    state.archive.offset = 0;
+    state.archive.detailCache.clear();
+    closeDetail();
+    renderArchive();
+    notice(`Deleted ${response?.deleted || 0} server archive record(s).`, 'ok');
+  } catch (error) {
+    if (revision !== state.archive.mutationRevision || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    notice(`Could not clear the server archive: ${error.message}`, 'error');
+  } finally {
+    if (revision === state.archive.mutationRevision) {
+      state.archive.mutationBusy = false;
+      renderArchive();
+    }
   }
 });
 
-/* ── detail dialog ────────────────────────────────────────────────────── */
+/* ── archive detail and exports ──────────────────────────────────────── */
 
-function openDetail(s) {
-  el('detail-kicker').textContent = `${s.classification || 'unclassified'} · ${formatDate(s.scanned_at)}`;
-  el('detail-title').textContent = s.filename;
-  el('detail-summary').textContent = s.summary || 'No summary was produced for this scan.';
-  el('detail-text').textContent = s.text || '';
-  el('detail-fields').innerHTML = (s.fields || [])
-    .map((f) => `<div class="field-pair"><dt>${escapeHtml(f.label)}</dt><dd>${escapeHtml(f.value)}</dd></div>`)
-    .join('');
-  const fig = el('detail-figure');
-  if (s.thumbnail) { el('detail-img').src = s.thumbnail; fig.hidden = false; } else { fig.hidden = true; }
+async function openDetail(id) {
+  state.detail.revision += 1;
+  const revision = state.detail.revision;
+  state.detail.controller?.abort();
+  state.detail.controller = null;
+  state.detail.id = id;
   el('detail').hidden = false;
-}
-el('detail-close').addEventListener('click', () => { el('detail').hidden = true; });
-el('detail').addEventListener('click', (e) => { if (e.target === el('detail')) el('detail').hidden = true; });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') el('detail').hidden = true; });
+  el('detail-title').textContent =
+    state.archive.items.find((item) => item.id === id)?.filename || 'Scan details';
+  el('detail-status').textContent = 'Loading complete server record…';
+  el('detail-content').hidden = true;
 
-/* ── misc ─────────────────────────────────────────────────────────────── */
+  const cached = state.archive.detailCache.get(id);
+  if (cached) {
+    paintDetail(cached);
+    return;
+  }
+  const controller = new AbortController();
+  state.detail.controller = controller;
+  try {
+    const record = await api.getScan(id, { signal: controller.signal });
+    if (revision !== state.detail.revision || state.detail.id !== id) return;
+    markBackendReachable();
+    state.archive.detailCache.set(id, record);
+    paintDetail(record);
+  } catch (error) {
+    if (revision !== state.detail.revision || error?.kind === 'cancelled') return;
+    applyApiReachability(error);
+    if (error instanceof ApiError && error.status === 404) {
+      closeDetail();
+      notice('That scan no longer exists. Reloading the archive.', 'error');
+      loadArchive({ clearCache: true });
+      return;
+    }
+    el('detail-status').textContent = `Could not load details: ${error.message}`;
+  } finally {
+    if (revision === state.detail.revision) state.detail.controller = null;
+  }
+}
+
+function paintDetail(record) {
+  if (state.detail.id !== record.id) return;
+  const analysis = record.analysis;
+  el('detail-kicker').textContent =
+    `${analysis?.classification || 'unclassified'} · ${formatDate(record.scanned_at)}`;
+  el('detail-title').textContent = record.filename;
+  el('detail-summary').textContent =
+    analysis?.summary || 'No AI analysis was saved for this scan.';
+  el('detail-text').textContent = record.text || '';
+  el('detail-fields').innerHTML = (analysis?.fields || [])
+    .map((field) => `<div class="field-pair"><dt>${escapeHtml(field.label)}</dt><dd>${escapeHtml(field.value)}</dd></div>`)
+    .join('');
+  el('detail-status').textContent = '';
+  el('detail-content').hidden = false;
+}
+
+function closeDetail() {
+  state.detail.revision += 1;
+  state.detail.controller?.abort();
+  state.detail.controller = null;
+  state.detail.id = null;
+  el('detail').hidden = true;
+}
+
+el('detail-close').addEventListener('click', closeDetail);
+el('detail').addEventListener('click', (event) => {
+  if (event.target === el('detail')) closeDetail();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !el('detail').hidden) closeDetail();
+});
+
+el('btn-export').addEventListener('click', async () => {
+  if (state.archive.exportBusy || !state.archive.total) return;
+  clearTimeout(searchTimer);
+  state.archive.exportBusy = true;
+  renderArchive();
+  try {
+    const records = await collectArchiveForExport({
+      listScans: (query) => api.listScans(query),
+      getScan: (id) => api.getScan(id),
+      pageSize: 200,
+      concurrency: 4,
+    });
+    markBackendReachable();
+    downloadJson(records, 'visual-scan-server-archive.json');
+    notice(`Exported ${records.length} complete server record(s).`, 'ok');
+  } catch (error) {
+    applyApiReachability(error);
+    notice(`Export stopped without creating a partial file: ${error.message}`, 'error');
+  } finally {
+    state.archive.exportBusy = false;
+    renderArchive();
+  }
+});
+
+function paintLegacyBanner() {
+  const count = legacyStore.count();
+  el('legacy-banner').hidden = count === 0;
+  el('legacy-count').textContent = count;
+}
+
+el('btn-legacy-export').addEventListener('click', () => {
+  const records = legacyStore.all();
+  if (!records.length) {
+    paintLegacyBanner();
+    return;
+  }
+  downloadJson(records, 'visual-scan-legacy-browser-archive.json');
+  notice(`Exported ${records.length} legacy browser record(s).`, 'ok');
+});
+el('btn-legacy-clear').addEventListener('click', () => {
+  const count = legacyStore.count();
+  if (!count || !confirm(`Permanently delete ${count} legacy browser record(s)?`)) return;
+  try {
+    legacyStore.clear();
+    paintLegacyBanner();
+    notice('Legacy browser records were deleted.', 'ok');
+  } catch (error) {
+    const message = error instanceof StorageError
+      ? error.message
+      : 'Browser storage is unavailable.';
+    notice(`Could not delete legacy records: ${message}`, 'error');
+  }
+});
+
+function downloadJson(value, filename) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: 'application/json',
+  });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 2_000);
+}
+
+/* ── misc and startup ────────────────────────────────────────────────── */
 
 let noticeTimer = null;
 function notice(message, tone = 'info') {
-  const n = el('notice');
-  n.hidden = false;
-  n.textContent = message;
-  n.dataset.tone = tone;
+  const target = el('notice');
+  target.hidden = false;
+  target.textContent = message;
+  target.dataset.tone = tone;
   clearTimeout(noticeTimer);
-  noticeTimer = setTimeout(() => { n.hidden = true; }, 9000);
+  noticeTimer = setTimeout(() => { target.hidden = true; }, 12_000);
 }
 
-function escapeHtml(v) {
-  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (character) => (
+    {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[character]
   ));
 }
 
@@ -832,16 +1560,32 @@ function formatMegapixels(pixels) {
   return `${Math.round((pixels / 1_000_000) * 10) / 10} megapixels`;
 }
 
+function classificationLabel(value) {
+  const words = String(value).replaceAll('_', ' ');
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
+}
+
 el('dateline-date').textContent = new Date().toLocaleDateString(undefined, {
-  weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
 });
 
-window.addEventListener('beforeunload', () => { shutdown(); stopCamera(); });
+window.addEventListener('beforeunload', () => {
+  state.ocrController?.abort();
+  state.aiController?.abort();
+  state.archive.controller?.abort();
+  state.detail.controller?.abort();
+  shutdown();
+  stopCamera();
+});
 
-state.scans = store.all();
-renderResults();
-syncTextState();
 paintConnection();
-checkBackend();
+paintAiAvailability();
+paintLegacyBanner();
+renderArchive();
+syncTextState();
 paintOcrAvailability();
 loadOcrModels();
+checkBackend();

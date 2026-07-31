@@ -112,11 +112,17 @@ removed after selectors invalidate the visible OCR snapshot.
 Because the HttpOnly cookie is shared across tabs while JavaScript state is
 not, successful auth changes publish only a public user-ID-or-null hint through
 a versioned `BroadcastChannel`. Every hint, window focus, and transition to a
-visible document revalidates `GET /api/auth/session`. The local auth revision is
-advanced before the request so in-flight protected responses cannot cross that
-boundary; a confirmed identity mismatch clears account-derived state before
-loading the replacement owner's archive. BroadcastChannel absence degrades to
-focus/visibility revalidation rather than disabling authentication.
+visible document revalidates `GET /api/auth/session`. A different-user or
+anonymous hint immediately advances the auth revision and cancels protected
+work. Focus/visibility and same-user hints use a separate verification revision,
+so already-sent mutations and list requests are not aborted or silently
+discarded. Verification failure preserves the current identity, CSRF, editor,
+and archive while exposing an unavailable indicator. An exact anonymous or
+different-user response then performs the hard boundary transition and clears
+account-derived state before loading any replacement archive. Stale 401s from a
+rotated same-user session are identified by their request CSRF snapshot.
+BroadcastChannel absence degrades to focus/visibility verification rather than
+disabling authentication.
 
 ## OCR request flow
 

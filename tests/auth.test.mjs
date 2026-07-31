@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  AUTH_REVALIDATION_MODE,
   AuthContractError,
   EDITOR_PROVENANCE,
   anonymousAfterUnauthorized,
@@ -9,10 +10,13 @@ import {
   codePointLength,
   identityChanged,
   isAuthRequestCurrent,
+  isAuthRequestSessionCurrent,
   isAuthRevisionCurrent,
   isServerDerivedEditor,
   normalizeAuthSession,
   normalizeUsername,
+  planAuthRevalidation,
+  planAuthVerificationFailure,
   provenanceForOcrSource,
   serverFeaturesAvailable,
   validatePassword,
@@ -98,8 +102,87 @@ test('revision, identity, and 401 transitions are deterministic', () => {
     user: null,
     csrfToken: null,
     busy: false,
+    verificationUnavailable: false,
     revision: 5,
   });
+});
+
+test('ordinary focus revalidation preserves in-flight save and list generations', () => {
+  const auth = {
+    status: 'authenticated',
+    user: { id: 'one' },
+    csrfToken: 'csrf-one',
+    revision: 7,
+  };
+  const saveSnapshot = authRequestSnapshot(auth);
+  const focusPlan = planAuthRevalidation(auth);
+  const sameUserHintPlan = planAuthRevalidation(auth, {
+    hasIdentityHint: true,
+    identityHint: 'one',
+  });
+
+  assert.deepEqual(focusPlan, {
+    mode: AUTH_REVALIDATION_MODE.SOFT,
+    cancelProtected: false,
+    clearServerDerived: false,
+  });
+  assert.deepEqual(sameUserHintPlan, focusPlan);
+  assert.equal(isAuthRequestCurrent(auth, saveSnapshot), true);
+  assert.equal(isAuthRequestSessionCurrent(auth, saveSnapshot), true);
+});
+
+test('identity mismatch is the only hint that immediately invalidates protected state', () => {
+  const auth = {
+    status: 'authenticated',
+    user: { id: 'one' },
+    csrfToken: 'csrf-one',
+    revision: 7,
+  };
+
+  for (const identityHint of ['two', null]) {
+    assert.deepEqual(planAuthRevalidation(auth, {
+      hasIdentityHint: true,
+      identityHint,
+    }), {
+      mode: AUTH_REVALIDATION_MODE.BOUNDARY,
+      cancelProtected: true,
+      clearServerDerived: true,
+    });
+  }
+});
+
+test('authenticated verification failure preserves identity, CSRF, and derived state', () => {
+  const auth = {
+    status: 'authenticated',
+    user: { id: 'one' },
+    csrfToken: 'csrf-one',
+    revision: 7,
+  };
+
+  assert.deepEqual(planAuthVerificationFailure(auth), {
+    preserveIdentity: true,
+    clearServerDerived: false,
+  });
+  assert.deepEqual(planAuthVerificationFailure({
+    status: 'checking', user: null, csrfToken: null,
+  }, { initial: true }), {
+    preserveIdentity: false,
+    clearServerDerived: true,
+  });
+});
+
+test('same-user session rotation distinguishes stale 401 without discarding success', () => {
+  const auth = {
+    status: 'authenticated',
+    user: { id: 'one' },
+    csrfToken: 'csrf-one',
+    revision: 7,
+  };
+  const request = authRequestSnapshot(auth);
+  const rotated = { ...auth, csrfToken: 'csrf-two' };
+
+  assert.equal(isAuthRequestCurrent(rotated, request), true);
+  assert.equal(isAuthRequestSessionCurrent(rotated, request), false);
 });
 
 test('editor provenance survives OCR metadata invalidation decisions', () => {

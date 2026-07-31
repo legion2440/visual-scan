@@ -13,6 +13,11 @@ export const EDITOR_PROVENANCE = Object.freeze({
   SERVER_OCR: 'server_ocr',
 });
 
+export const AUTH_REVALIDATION_MODE = Object.freeze({
+  SOFT: 'soft',
+  BOUNDARY: 'boundary',
+});
+
 export function codePointLength(value) {
   return Array.from(String(value)).length;
 }
@@ -106,6 +111,7 @@ export function authRequestSnapshot(authState) {
   return Object.freeze({
     revision: authState.revision,
     userId: authState.status === 'authenticated' ? authState.user?.id || null : null,
+    csrfToken: authState.status === 'authenticated' ? authState.csrfToken || null : null,
   });
 }
 
@@ -116,6 +122,40 @@ export function isAuthRequestCurrent(authState, snapshot) {
     && authState.revision === snapshot.revision
     && authState.user?.id === snapshot.userId,
   );
+}
+
+export function isAuthRequestSessionCurrent(authState, snapshot) {
+  return isAuthRequestCurrent(authState, snapshot)
+    && authState.csrfToken === snapshot.csrfToken;
+}
+
+export function planAuthRevalidation(
+  authState,
+  { hasIdentityHint = false, identityHint = null } = {},
+) {
+  const authenticated = authState.status === 'authenticated' && Boolean(authState.user);
+  const currentUserId = authenticated ? authState.user.id : null;
+  const identityMismatch = hasIdentityHint && currentUserId !== identityHint;
+  const mode = authenticated && !identityMismatch
+    ? AUTH_REVALIDATION_MODE.SOFT
+    : AUTH_REVALIDATION_MODE.BOUNDARY;
+  return Object.freeze({
+    mode,
+    cancelProtected: mode === AUTH_REVALIDATION_MODE.BOUNDARY,
+    clearServerDerived: identityMismatch,
+  });
+}
+
+export function planAuthVerificationFailure(authState, { initial = false } = {}) {
+  const preserveIdentity = !initial
+    && authState.status === 'authenticated'
+    && Boolean(authState.user)
+    && typeof authState.csrfToken === 'string'
+    && Boolean(authState.csrfToken);
+  return Object.freeze({
+    preserveIdentity,
+    clearServerDerived: !preserveIdentity,
+  });
 }
 
 export function provenanceForOcrSource(source) {
@@ -143,6 +183,7 @@ export function anonymousAfterUnauthorized(authState) {
     user: null,
     csrfToken: null,
     busy: false,
+    verificationUnavailable: false,
     revision: authState.revision + 1,
   };
 }

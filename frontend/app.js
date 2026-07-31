@@ -42,16 +42,20 @@ import {
 } from './utils/archive.js';
 import { legacyStore, StorageError } from './utils/store.js';
 import {
+  AUTH_REVALIDATION_MODE,
   AuthContractError,
   EDITOR_PROVENANCE,
   anonymousAfterUnauthorized,
   authRequestSnapshot,
   identityChanged,
   isAuthRequestCurrent,
+  isAuthRequestSessionCurrent,
   isAuthRevisionCurrent,
   isServerDerivedEditor,
   normalizeAuthSession,
   normalizeUsername,
+  planAuthRevalidation,
+  planAuthVerificationFailure,
   provenanceForOcrSource,
   serverFeaturesAvailable,
   validatePassword,
@@ -119,6 +123,9 @@ const state = {
     busy: false,
     revision: 0,
     controller: null,
+    verificationRevision: 0,
+    verificationController: null,
+    verificationUnavailable: false,
     legacy: {
       count: 0,
       claimable: false,
@@ -200,7 +207,19 @@ async function runScheduledAuthRevalidation() {
   }
   const identityHint = pendingIdentityHint;
   pendingIdentityHint = NO_IDENTITY_HINT;
-  await restoreAuthSession({ revalidation: true, identityHint });
+  const hasIdentityHint = identityHint !== NO_IDENTITY_HINT;
+  const plan = planAuthRevalidation(state.auth, {
+    hasIdentityHint,
+    identityHint: hasIdentityHint ? identityHint : null,
+  });
+  if (plan.mode === AUTH_REVALIDATION_MODE.SOFT) {
+    await verifyAuthenticatedSession();
+  } else {
+    await restoreAuthSession({
+      revalidation: true,
+      identityHint,
+    });
+  }
 }
 
 function beginProtectedRequest() {
@@ -209,6 +228,12 @@ function beginProtectedRequest() {
 
 function protectedRequestIsCurrent(requestAuth) {
   return isAuthRequestCurrent(state.auth, requestAuth);
+}
+
+function cancelAuthVerification() {
+  state.auth.verificationRevision += 1;
+  state.auth.verificationController?.abort();
+  state.auth.verificationController = null;
 }
 
 function cancelSaveRequest() {
@@ -298,7 +323,10 @@ function paintAuthState() {
   el('auth-label').textContent = checking
     ? 'Session: checking…'
     : signedIn
-      ? `Signed in: ${state.auth.user.username}`
+      ? [
+        `Signed in: ${state.auth.user.username}`,
+        state.auth.verificationUnavailable ? 'verification unavailable' : '',
+      ].filter(Boolean).join(' · ')
       : 'Session: anonymous';
   el('btn-sign-in').hidden = checking || signedIn;
   el('btn-register').hidden = checking || signedIn;
@@ -318,11 +346,13 @@ function applyAuthenticatedSession(session) {
   state.auth.user = session.user;
   state.auth.csrfToken = session.csrfToken;
   state.auth.busy = false;
+  state.auth.verificationUnavailable = false;
   api.setCsrfToken(session.csrfToken);
   paintAuthState();
 }
 
 function becomeAnonymous(message = '') {
+  cancelAuthVerification();
   api.clearCsrfToken();
   state.auth = {
     ...anonymousAfterUnauthorized(state.auth),
@@ -338,6 +368,13 @@ function handleProtectedApiError(error, requestAuth) {
   if (requestAuth && !protectedRequestIsCurrent(requestAuth)) return true;
   applyApiReachability(error);
   if (error instanceof ApiError && error.status === 401) {
+    if (requestAuth && !isAuthRequestSessionCurrent(state.auth, requestAuth)) {
+      notice(
+        'A request from the previous session was rejected. Your current session is unchanged.',
+        'info',
+      );
+      return true;
+    }
     becomeAnonymous('Your session ended. Sign in again to use server features.');
     publishAuthIdentity();
     return true;
@@ -1939,6 +1976,7 @@ el('auth-form').addEventListener('submit', async (event) => {
     return;
   }
 
+  cancelAuthVerification();
   state.auth.revision += 1;
   const revision = state.auth.revision;
   state.auth.controller?.abort();
@@ -1981,6 +2019,70 @@ el('auth-form').addEventListener('submit', async (event) => {
   }
 });
 
+async function verifyAuthenticatedSession() {
+  const requestAuth = beginProtectedRequest();
+  if (!protectedRequestIsCurrent(requestAuth)) return;
+
+  state.auth.verificationRevision += 1;
+  const verificationRevision = state.auth.verificationRevision;
+  state.auth.verificationController?.abort();
+  const controller = new AbortController();
+  state.auth.verificationController = controller;
+
+  try {
+    const response = await api.authSession({ signal: controller.signal });
+    if (
+      verificationRevision !== state.auth.verificationRevision
+      || !protectedRequestIsCurrent(requestAuth)
+    ) return;
+    markBackendReachable();
+    const session = normalizeAuthSession(response);
+    if (session.status === 'authenticated' && session.user.id === requestAuth.userId) {
+      state.auth.user = session.user;
+      state.auth.csrfToken = session.csrfToken;
+      state.auth.verificationUnavailable = false;
+      api.setCsrfToken(session.csrfToken);
+      paintAuthState();
+      return;
+    }
+
+    if (session.status === 'anonymous') {
+      becomeAnonymous();
+      return;
+    }
+
+    cancelAuthVerification();
+    state.auth.revision += 1;
+    cancelAuthBoundRequests();
+    applyAuthenticatedSession(session);
+    await loadArchive({ clearCache: true, quiet: true });
+    await loadServerLegacyStatus();
+  } catch (error) {
+    if (
+      verificationRevision !== state.auth.verificationRevision
+      || !protectedRequestIsCurrent(requestAuth)
+      || error?.kind === 'cancelled'
+    ) return;
+    applyApiReachability(error);
+    const failure = planAuthVerificationFailure(state.auth);
+    if (failure.preserveIdentity) {
+      const firstFailure = !state.auth.verificationUnavailable;
+      state.auth.verificationUnavailable = true;
+      api.setCsrfToken(state.auth.csrfToken);
+      paintAuthState();
+      if (firstFailure) {
+        notice('Session verification is unavailable. Your current work was preserved.', 'error');
+      }
+    } else if (failure.clearServerDerived) {
+      becomeAnonymous();
+    }
+  } finally {
+    if (verificationRevision === state.auth.verificationRevision) {
+      state.auth.verificationController = null;
+    }
+  }
+}
+
 async function restoreAuthSession({
   revalidation = false,
   identityHint = NO_IDENTITY_HINT,
@@ -1989,6 +2091,7 @@ async function restoreAuthSession({
   const previousUserId = previousUser?.id || null;
   const clearForHint = identityHint !== NO_IDENTITY_HINT
     && previousUserId !== identityHint;
+  cancelAuthVerification();
   state.auth.revision += 1;
   const revision = state.auth.revision;
   state.auth.controller?.abort();
@@ -2016,6 +2119,7 @@ async function restoreAuthSession({
       state.auth.status = 'anonymous';
       state.auth.user = null;
       state.auth.csrfToken = null;
+      state.auth.verificationUnavailable = false;
       clearServerDerivedState();
     }
   } catch (error) {
@@ -2025,6 +2129,7 @@ async function restoreAuthSession({
     state.auth.status = 'anonymous';
     state.auth.user = null;
     state.auth.csrfToken = null;
+    state.auth.verificationUnavailable = false;
     clearServerDerivedState();
   } finally {
     if (isAuthRevisionCurrent(state.auth, revision)) {
@@ -2047,6 +2152,7 @@ el('btn-logout').addEventListener('click', async () => {
     'Log out with unsaved editor text? Account-derived results will be cleared; browser/manual text remains local.',
   )) return;
 
+  cancelAuthVerification();
   state.auth.revision += 1;
   const revision = state.auth.revision;
   cancelAuthBoundRequests();
@@ -2244,6 +2350,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('beforeunload', () => {
   clearTimeout(authRevalidationTimer);
   authSync?.close();
+  state.auth.verificationController?.abort();
   state.ocrController?.abort();
   state.aiController?.abort();
   state.archive.controller?.abort();

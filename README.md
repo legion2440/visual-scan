@@ -350,9 +350,15 @@ Tabs synchronize successful login, registration, logout, and current-session
 401 changes through a versioned `BroadcastChannel`. Messages contain only the
 resulting public user ID or `null`, never a cookie or CSRF value. Receiving a
 signal, returning focus to the window, or making the document visible triggers
-a fresh `GET /api/auth/session`. Protected work is revision-invalidated before
-that check; a different user or anonymous result clears server-derived editor,
-AI, archive, detail, and legacy-claim state before the new archive is shown.
+a fresh `GET /api/auth/session`. A hint containing a different user ID or
+`null` immediately invalidates protected work. Ordinary focus/visibility and a
+same-user hint use non-destructive verification: current save, mutation, OCR,
+AI, export, and list requests continue. A verification network/timeout/HTTP
+failure preserves identity, CSRF, editor, and archive state while marking the
+session verification unavailable. Only an exact anonymous response, a current
+protected 401, or a confirmed different user clears account-derived state.
+Stale 401 responses from a rotated same-user session are distinguished by the
+request's CSRF snapshot and cannot log out the replacement session.
 
 The exact SQLite v1 archive is migrated to a separate `legacy_scans` table.
 Nothing is assigned automatically. The first registered user sees an explicit
@@ -889,7 +895,8 @@ protected 401 behavior,
 Origin/CSRF enforcement, Argon2 hashing, dummy verification, atomic login
 rotation/rate-bucket cleanup, expiry/touch timing, HMAC rate limits, cross-user
 404 isolation, and atomic one-time legacy claim. Frontend tests also cover
-auth/CSRF generation guards, cross-tab identity messages, graceful
+auth/CSRF generation guards, soft versus boundary revalidation, preservation
+on verification failure, cross-tab identity messages, graceful
 BroadcastChannel fallback, and persistent editor provenance. The dependency
 graph check rejects undeclared cross-feature imports and stale generated output.
 

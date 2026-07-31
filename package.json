@@ -5,6 +5,7 @@
   "scripts": {
     "ocr:download": "node scripts/download-ocr-models.mjs",
     "ocr:verify": "node scripts/verify-ocr-models.mjs",
+    "samples:verify": "node scripts/verify-sample-docs.mjs",
     "test": "node --test tests/*.test.mjs"
   }
 }

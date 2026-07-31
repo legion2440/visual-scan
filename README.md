@@ -243,6 +243,54 @@ browser still asks the user for permission.
 With both servers running, the frontend connection indicator reports
 `Backend: reachable`.
 
+## Verified demo corpus
+
+The sample picker is populated from `public/sample-docs/manifest.json`. Every
+fixture is synthetic, stored locally, and loaded as an ordinary `File` through
+the same validation and decode path as a user upload. Loading a sample never
+runs OCR or AI automatically, changes OCR settings, opens the sign-in dialog,
+or saves anything to the archive.
+
+| Sample | Format | Language | Intended exercise |
+| --- | --- | --- | --- |
+| Clean invoice | PNG | English | High-contrast browser OCR |
+| Compressed receipt | JPEG | English | Rotation and compression |
+| Skewed Russian contract | PNG | Russian | Deskew and Russian OCR |
+| Bilingual letter | PNG | English + Russian | Combined language data |
+| Low-contrast note | PNG | English | Grayscale and threshold cleanup |
+| Two-page statement | PDF | English | Sequential server OCR across two pages |
+
+All people, organizations, identifiers, dates, amounts, and transactions are
+fictional. The corpus contains no real personal or banking data, signatures,
+addresses, telephone numbers, or external logos. Full provenance is recorded
+in `public/sample-docs/SOURCES.md`.
+
+Each sample has an accompanying UTF-8 reference text. It records the
+authoritative source content; it is not a golden OCR result and does not imply
+character-for-character recognition. OCR output varies with engine, model,
+version, preprocessing, and platform, so this corpus is not an OCR benchmark.
+
+Verify manifest structure, paths, sizes, SHA-256 digests, signatures, image
+dimensions, PDF page count, reference text, and the 15 MiB corpus limit:
+
+```bash
+npm run samples:verify
+```
+
+Sample-based smoke procedure:
+
+1. Start the repository HTTP server and open the frontend.
+2. While anonymous, load every image and run browser OCR where the suggested
+   model is installed. Load the PDF and confirm that extraction requires
+   sign-in without opening the dialog automatically.
+3. Sign in, run server image OCR and both PDF pages, optionally analyze the
+   result, save it to the owner-scoped archive, and log out.
+4. Confirm that logout clears server-derived content while browser/manual text
+   and legacy export remain available.
+5. Exercise a missing asset, unavailable manifest, rapid sample switching,
+   sample-to-local-file switching, missing browser traineddata, and unavailable
+   backend Tesseract. Core local upload must remain usable.
+
 ## Backend configuration
 
 Backend settings use the `VISUAL_SCAN_` environment prefix. Copy values from
@@ -433,13 +481,15 @@ external provider.
 
 ## Frontend configuration
 
-Browser/runtime settings have one source of truth:
+Browser/runtime URLs and deadlines are composed in:
 
 ```text
 frontend/config.js
 ```
 
-The backend URL defaults to `http://localhost:8000`. Change
+Environment-neutral byte, pixel, and MIME intake limits live in
+`frontend/intakeContract.js`; both browser code and the Node corpus verifier
+import that contract. The backend URL defaults to `http://localhost:8000`. Change
 `CONFIG.backendUrl` when the backend runs elsewhere. Every application backend
 request is implemented in `frontend/utils/api.js`. Operation deadlines are:
 
@@ -452,8 +502,9 @@ The transport distinguishes HTTP, network, timeout, and caller-cancelled
 errors. Any HTTP response proves reachability. Network failures and timeouts
 mark the backend unavailable; superseded requests do not alter the indicator.
 The same transport owns the in-memory CSRF value, adds it only to unsafe
-authenticated requests, sends credentials for every request, and clears CSRF
-on HTTP 401 only when the response belongs to the current CSRF generation.
+authenticated requests, and sends credentials for every request. A protected
+401 triggers non-destructive session verification; CSRF and account-derived
+state are cleared only after an exact anonymous session response.
 Application auth/archive/editor state remains in `app.js`; the transport never
 stores it.
 
@@ -464,6 +515,8 @@ between runtime and setup.
 
 Static OCR assets are intentionally handled by `frontend/utils/ocr.js`:
 `manifest.json` and local traineddata are not backend API requests.
+Static demo manifest/assets are similarly isolated in
+`frontend/utils/samples.js`; they never pass through the backend API transport.
 
 Archive mapping, exact AI-result freshness, storage snapshot limits,
 pagination, reachability transitions, and best-effort export live in the pure
@@ -752,7 +805,7 @@ curl -X POST http://localhost:8000/api/ocr/recognize \
   -b .visual-scan-cookies.txt \
   -H "Origin: http://localhost:5500" \
   -H "X-CSRF-Token: $CSRF" \
-  -F "file=@public/sample-docs/invoice.jpg;type=image/jpeg" \
+  -F "file=@public/sample-docs/invoice-en-clean.png;type=image/png" \
   -F "language=eng" \
   -F "preprocessing=grayscale"
 ```
@@ -761,7 +814,7 @@ Example response:
 
 ```json
 {
-  "filename": "invoice.jpg",
+  "filename": "invoice-en-clean.png",
   "text": "Recognized text",
   "confidence": 91.25,
   "words": 2,
@@ -876,6 +929,7 @@ python -m ruff check backend
 python -m ruff format --check backend
 python -m compileall backend/app backend/tests
 python backend/scripts/generate_dependency_graph.py --check
+npm run samples:verify
 npm test
 ```
 
@@ -890,16 +944,19 @@ real AI server or API key. The test suite never requires the system Tesseract
 binary. Scans tests use only SQLite databases under pytest `tmp_path`, exercise
 the real application lifespan, and cover schema validation, WAL concurrency,
 transactions, Unicode search, deterministic pagination, and safe failures.
-Auth tests cover cookie attributes, read-only session inspection, stale
-protected 401 behavior,
-Origin/CSRF enforcement, Argon2 hashing, dummy verification, atomic login
-rotation/rate-bucket cleanup, expiry/touch timing, HMAC rate limits, cross-user
+Auth tests cover cookie attributes, read-only session inspection, protected
+401 confirmation, Origin/CSRF enforcement, Argon2 hashing, dummy verification,
+atomic login rotation/rate-bucket cleanup, expiry/touch timing, HMAC rate limits, cross-user
 404 isolation, and atomic one-time legacy claim. Frontend tests also cover
 auth/CSRF generation guards, soft versus boundary revalidation, confirmation
 of protected 401 responses, preservation on verification failure, cross-tab
 identity messages, graceful
 BroadcastChannel fallback, and persistent editor provenance. The dependency
 graph check rejects undeclared cross-feature imports and stale generated output.
+Sample tests cover strict manifest normalization, path confinement, missing
+references, checksum/size/dimension drift, image/PDF `File` conversion,
+HTTP/MIME/oversize errors, aborts, stale completion, and unavailable-manifest
+degradation without invoking Tesseract.
 
 ## Structure
 
@@ -995,24 +1052,34 @@ visual-scan/
 │   │   ├── auth.js
 │   │   ├── authSync.js
 │   │   ├── archive.js
+│   │   ├── samples.js
 │   │   └── store.js
 │   ├── index.html
 │   ├── styles.css
 │   ├── app.js
 │   ├── config.js
+│   ├── intakeContract.js
 │   └── ocrProfiles.js
 ├── scripts/
 │   ├── download-ocr-models.mjs
-│   └── verify-ocr-models.mjs
+│   ├── verify-ocr-models.mjs
+│   └── verify-sample-docs.mjs
 ├── tests/
 │   ├── api.test.mjs
 │   ├── archive.test.mjs
 │   ├── auth.test.mjs
 │   ├── authSync.test.mjs
 │   ├── ocr.test.mjs
+│   ├── samples.test.mjs
 │   └── store.test.mjs
 ├── public/
 │   └── sample-docs/
+│       ├── manifest.json
+│       ├── SOURCES.md
+│       ├── *.txt
+│       ├── *.png
+│       ├── *.jpg
+│       └── *.pdf
 ├── package.json
 ├── .gitignore
 └── README.md
@@ -1038,13 +1105,15 @@ visual-scan/
 - `backend/module-map.json` is the backend navigation and ownership index.
 - `backend/DEPENDENCY_GRAPH.md` is deterministically generated from that map.
 - `app.js` connects the interface, state, and user actions.
-- `config.js` contains browser/runtime URLs and safety limits.
+- `config.js` composes browser/runtime URLs, deadlines, and shared limits.
+- `intakeContract.js` is the shared pure MIME, byte, and pixel limit registry.
 - `ocrProfiles.js` is the shared pure OCR registry.
 - `imageUtils.js` contains Canvas image operations.
 - `ocr.js` owns availability, the active Tesseract worker, and OCR progress.
 - `api.js` is the only backend HTTP transport module.
 - `auth.js` owns pure frontend auth validation and state-transition helpers.
 - `authSync.js` owns credential-free cross-tab identity-change hints.
+- `samples.js` owns demo manifest normalization and static sample fetches.
 - `archive.js` owns pure OCR/archive mapping, freshness, pagination, and
   complete-export coordination.
 - `store.js` is a compatibility reader/export/clear adapter for legacy

@@ -1,0 +1,13 @@
+CLOUD NINE MARKET
+RECEIPT
+Receipt: RCPT-DEMO-208
+Date: 2026-04-06
+Notebook 2 x USD 4.50 = USD 9.00
+Archive box 1 x USD 7.25 = USD 7.25
+Blue pen set 1 x USD 5.75 = USD 5.75
+Subtotal: USD 22.00
+Demo tax: USD 1.76
+Total: USD 23.76
+Payment: DEMO CARD
+Thank you for testing Visual Scan
+support@example.com

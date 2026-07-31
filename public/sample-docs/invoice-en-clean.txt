@@ -1,0 +1,14 @@
+NORTHSTAR PAPERWORK
+INVOICE
+Invoice number: INV-DEMO-1042
+Issue date: 2026-02-14
+Due date: 2026-03-01
+Bill to: Morgan Vale
+Description: Document review service
+Quantity: 3
+Unit price: USD 120.00
+Subtotal: USD 360.00
+Demo tax: USD 28.80
+Total due: USD 388.80
+Reference: PROJECT-ORBIT
+Questions: billing@example.com

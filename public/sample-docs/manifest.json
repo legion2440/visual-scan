@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "samples": [
+    {
+      "id": "invoice-en-clean",
+      "label": "Clean invoice",
+      "description": "High-contrast English invoice with a compact item and totals table.",
+      "asset": "invoice-en-clean.png",
+      "kind": "image",
+      "mime": "image/png",
+      "language": "eng",
+      "reference_text": "invoice-en-clean.txt",
+      "suggested_classification": "invoice",
+      "suggested_settings": {
+        "engine": "browser",
+        "profile": "fast"
+      },
+      "bytes": 117087,
+      "sha256": "281ada07f65504c1b900aeb382af0011d8114b6c11bf8e691203afc226db50d7",
+      "width": 1600,
+      "height": 2200
+    },
+    {
+      "id": "receipt-en-compressed",
+      "label": "Compressed receipt",
+      "description": "Synthetic mobile-style receipt with rotation and visible JPEG compression.",
+      "asset": "receipt-en-compressed.jpg",
+      "kind": "image",
+      "mime": "image/jpeg",
+      "language": "eng",
+      "reference_text": "receipt-en-compressed.txt",
+      "suggested_classification": "receipt",
+      "suggested_settings": {
+        "engine": "browser",
+        "profile": "fast"
+      },
+      "bytes": 72626,
+      "sha256": "d39e8608d9dac0f31e37e21218f45547c16b8ddb30b2c34bf40ce29af8f9e595",
+      "width": 1400,
+      "height": 2000
+    },
+    {
+      "id": "contract-ru-skewed",
+      "label": "Skewed Russian contract",
+      "description": "Russian training contract with a small deliberate page skew.",
+      "asset": "contract-ru-skewed.png",
+      "kind": "image",
+      "mime": "image/png",
+      "language": "rus",
+      "reference_text": "contract-ru-skewed.txt",
+      "suggested_classification": "contract",
+      "suggested_settings": {
+        "engine": "browser",
+        "profile": "standard"
+      },
+      "bytes": 422102,
+      "sha256": "ba465ead35118af6cd736e7f70f0b80396fb3b407ab0b62095ee7716aaf22528",
+      "width": 1600,
+      "height": 2200
+    },
+    {
+      "id": "letter-en-ru",
+      "label": "Bilingual letter",
+      "description": "English and Russian project letter for the combined language profile.",
+      "asset": "letter-en-ru.png",
+      "kind": "image",
+      "mime": "image/png",
+      "language": "eng+rus",
+      "reference_text": "letter-en-ru.txt",
+      "suggested_classification": "letter",
+      "suggested_settings": {
+        "engine": "browser",
+        "profile": "standard"
+      },
+      "bytes": 122864,
+      "sha256": "5ed4c37fea88461c6d08616632737b4ab8a53ffe07dd55f121167e86fe13af3a",
+      "width": 1600,
+      "height": 2200
+    },
+    {
+      "id": "note-en-low-contrast",
+      "label": "Low-contrast note",
+      "description": "Typed English project note designed to demonstrate threshold cleanup.",
+      "asset": "note-en-low-contrast.png",
+      "kind": "image",
+      "mime": "image/png",
+      "language": "eng",
+      "reference_text": "note-en-low-contrast.txt",
+      "suggested_classification": "note",
+      "suggested_settings": {
+        "engine": "browser",
+        "profile": "fast",
+        "preprocessing": "threshold",
+        "threshold": 176
+      },
+      "bytes": 83774,
+      "sha256": "c4410c34a31a0296cf8e10c248fce0b33ab0e101c132bb6727e59731e7dd6dbf",
+      "width": 1400,
+      "height": 1800
+    },
+    {
+      "id": "statement-en-2page",
+      "label": "Two-page statement",
+      "description": "Image-only English PDF for sequential server OCR across two pages.",
+      "asset": "statement-en-2page.pdf",
+      "kind": "pdf",
+      "mime": "application/pdf",
+      "language": "eng",
+      "reference_text": "statement-en-2page.txt",
+      "suggested_classification": "statement",
+      "suggested_settings": {
+        "engine": "server",
+        "preprocessing": "none"
+      },
+      "bytes": 269875,
+      "sha256": "92b96ad3d27bb99f1eb38c1cdf8158d9044b9388104ce0e1ef222788d3ba89a9",
+      "page_count": 2
+    }
+  ]
+}

@@ -1,13 +1,18 @@
 /**
  * Frontend runtime configuration.
  *
- * This is the single source of truth for the backend address and client-side
- * safety limits. Keep environment-specific values here; HTTP calls themselves
- * belong in utils/api.js.
+ * This composes environment-neutral intake/OCR contracts with browser runtime
+ * URLs and deadlines. Backend HTTP calls themselves belong in utils/api.js.
  */
 import { DEFAULT_OCR_PROFILE } from './ocrProfiles.js';
+import {
+  INTAKE_LIMITS,
+  SUPPORTED_IMAGE_TYPES,
+  SUPPORTED_PDF_TYPE,
+} from './intakeContract.js';
 
 const ocrDataRootUrl = new URL('./assets/tessdata', import.meta.url).href.replace(/\/$/, '');
+const sampleManifestUrl = new URL('../public/sample-docs/manifest.json', import.meta.url).href;
 
 export const CONFIG = Object.freeze({
   backendUrl: 'http://localhost:8000',
@@ -16,15 +21,12 @@ export const CONFIG = Object.freeze({
   imageOcrTimeoutMs: 60_000,
   aiTimeoutMs: 60_000,
   pdfOcrTimeoutMs: 210_000,
-  maxImageBytes: 20 * 1024 * 1024,
-  maxPdfBytes: 50 * 1024 * 1024,
-  maxImagePixels: 25_000_000,
-  supportedImageTypes: Object.freeze([
-    'image/jpeg',
-    'image/png',
-    'image/webp',
-  ]),
-  supportedPdfType: 'application/pdf',
+  maxImageBytes: INTAKE_LIMITS.maxImageBytes,
+  maxPdfBytes: INTAKE_LIMITS.maxPdfBytes,
+  maxImagePixels: INTAKE_LIMITS.maxImagePixels,
+  supportedImageTypes: SUPPORTED_IMAGE_TYPES,
+  supportedPdfType: SUPPORTED_PDF_TYPE,
+  sampleManifestUrl,
   ocr: Object.freeze({
     defaultProfile: DEFAULT_OCR_PROFILE,
     dataRootUrl: ocrDataRootUrl,

@@ -76,12 +76,18 @@
         <button class="btn btn-secondary" id="btn-camera" type="button">Use camera</button>
         <button class="btn btn-secondary" id="btn-shoot" type="button" hidden>Take photo</button>
         <button class="btn btn-ghost" id="btn-camera-stop" type="button" hidden>Stop camera</button>
-        <span class="spacer"></span>
-        <span class="text-muted samples-label">Samples:</span>
-        <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/invoice.jpg">invoice</button>
-        <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/contract.jpg">contract</button>
-        <button class="btn btn-ghost sample" type="button" data-src="../public/sample-docs/note.jpg">note</button>
       </div>
+
+      <section class="samples" aria-labelledby="samples-title">
+        <div class="samples-heading">
+          <div>
+            <p class="card-kicker">Demo corpus</p>
+            <h3 id="samples-title">Try a synthetic document</h3>
+          </div>
+          <p class="text-muted" id="sample-status" role="status" aria-live="polite">Loading the verified demo corpus…</p>
+        </div>
+        <div class="sample-list" id="sample-list"></div>
+      </section>
 
       <section class="pdf-card card" id="pdf-card" hidden>
         <p class="card-kicker">PDF document</p>

@@ -61,6 +61,12 @@ import {
   validatePassword,
 } from './utils/auth.js';
 import { createAuthSync } from './utils/authSync.js';
+import {
+  SampleDocsError,
+  loadSampleFile,
+  loadSampleManifestState,
+  sampleUiMetadata,
+} from './utils/samples.js';
 
 const el = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -78,6 +84,12 @@ const state = {
   cropRect: null,
   source: { kind: null, file: null, name: '', size: 0, type: '' },
   intakeRevision: 0,
+  sampleController: null,
+  samples: {
+    status: 'loading',
+    items: [],
+    loadingId: null,
+  },
   sourceRevision: 0,
   ocrEngine: 'browser',
   ocr: null,
@@ -454,6 +466,17 @@ function beginNewSource() {
   syncTextState();
 }
 
+function reserveIntake() {
+  state.intakeRevision += 1;
+  state.sampleController?.abort();
+  state.sampleController = null;
+  if (state.samples.loadingId !== null) {
+    state.samples.loadingId = null;
+    renderSampleList();
+  }
+  return state.intakeRevision;
+}
+
 function invalidateProcessedSource() {
   state.sourceRevision += 1;
   cancelOcrRequest();
@@ -491,60 +514,143 @@ el('file-input').addEventListener('change', (event) => {
   else notice('No file was selected.', 'error');
   event.target.value = '';
 });
-$$('.sample').forEach((button) => {
-  button.addEventListener('click', () => loadSample(button.dataset.src, button.textContent.trim()));
-});
-
-async function loadFile(file) {
+async function loadFile(file, { intakeRevision: reservedRevision } = {}) {
   if (!file) {
     notice('No file was selected.', 'error');
-    return;
+    return false;
   }
-  const intakeRevision = ++state.intakeRevision;
+  const intakeRevision = reservedRevision ?? reserveIntake();
+  if (intakeRevision !== state.intakeRevision) return false;
   if (file.type === CONFIG.supportedPdfType) {
     if (file.size > CONFIG.maxPdfBytes) {
       notice(`That PDF is too large. The maximum file size is ${formatMegabytes(CONFIG.maxPdfBytes)}.`, 'error');
-      return;
+      return false;
     }
-    if (intakeRevision === state.intakeRevision) adoptPdf(file);
-    return;
+    if (intakeRevision === state.intakeRevision) {
+      adoptPdf(file);
+      return true;
+    }
+    return false;
   }
   if (!CONFIG.supportedImageTypes.includes(file.type)) {
     notice('Unsupported format. Choose a JPEG, PNG, WebP, or PDF file.', 'error');
-    return;
+    return false;
   }
   if (file.size > CONFIG.maxImageBytes) {
     notice(`That image is too large. The maximum file size is ${formatMegabytes(CONFIG.maxImageBytes)}.`, 'error');
-    return;
+    return false;
   }
   try {
     const image = await IU.fileToImage(file);
-    if (intakeRevision !== state.intakeRevision) return;
-    adoptImage(image, {
+    if (intakeRevision !== state.intakeRevision) return false;
+    return adoptImage(image, {
       file,
       name: file.name,
       size: file.size,
       type: file.type,
     });
   } catch (error) {
-    notice(error.message || 'Could not decode this image.', 'error');
+    if (intakeRevision === state.intakeRevision) {
+      notice(error.message || 'Could not decode this image.', 'error');
+    }
+    return false;
   }
 }
 
-async function loadSample(src, label) {
-  const intakeRevision = ++state.intakeRevision;
+async function loadSample(sample) {
+  const intakeRevision = reserveIntake();
+  const controller = new AbortController();
+  state.sampleController = controller;
+  state.samples.loadingId = sample.id;
+  renderSampleList();
   try {
-    const image = await IU.loadImage(src);
-    if (intakeRevision !== state.intakeRevision) return;
-    adoptImage(image, {
-      file: null,
-      name: src.split('/').pop(),
-      size: 0,
-      type: 'image/jpeg',
+    const file = await loadSampleFile(sample, {
+      manifestUrl: CONFIG.sampleManifestUrl,
+      signal: controller.signal,
+      isCurrent: () => intakeRevision === state.intakeRevision,
     });
-  } catch {
-    notice(`Sample “${label}” is missing from /public/sample-docs/.`, 'error');
+    if (intakeRevision !== state.intakeRevision) return;
+    await loadFile(file, { intakeRevision });
+  } catch (error) {
+    if (
+      intakeRevision === state.intakeRevision
+      && error instanceof SampleDocsError
+      && !['aborted', 'stale'].includes(error.code)
+    ) {
+      notice(`Could not load “${sample.label}”: ${error.message}`, 'error');
+    }
+  } finally {
+    if (state.sampleController === controller) state.sampleController = null;
+    if (intakeRevision === state.intakeRevision && state.samples.loadingId === sample.id) {
+      state.samples.loadingId = null;
+      renderSampleList();
+    }
   }
+}
+
+function renderSampleList() {
+  const list = el('sample-list');
+  const status = el('sample-status');
+  list.replaceChildren();
+  if (state.samples.status === 'loading') {
+    status.textContent = 'Loading the verified demo corpus…';
+    status.dataset.state = 'ready';
+    return;
+  }
+  if (state.samples.status === 'unavailable') {
+    status.textContent = 'Demo samples are unavailable. Local files and camera still work.';
+    status.dataset.state = 'missing';
+    return;
+  }
+  status.textContent = 'Synthetic documents. Loading a sample does not run OCR or save it.';
+  status.dataset.state = 'ready';
+  for (const sample of state.samples.items) {
+    const metadata = sampleUiMetadata(sample);
+    const card = document.createElement('article');
+    card.className = 'sample-card';
+
+    const heading = document.createElement('h3');
+    heading.textContent = sample.label;
+    const badges = document.createElement('p');
+    badges.className = 'sample-meta';
+    badges.textContent = [metadata.typeLabel, metadata.languageLabel].join(' · ');
+    const description = document.createElement('p');
+    description.className = 'sample-description';
+    description.textContent = sample.description;
+    const settings = document.createElement('p');
+    settings.className = 'sample-settings text-muted';
+    settings.textContent = `Suggested: ${metadata.settingsLabel}`;
+    if (metadata.requiresSignIn) settings.textContent += ' · sign-in required for OCR';
+    const button = document.createElement('button');
+    button.className = 'btn btn-ghost';
+    button.type = 'button';
+    button.dataset.sampleId = sample.id;
+    button.disabled = state.samples.loadingId === sample.id;
+    button.textContent = button.disabled ? 'Loading…' : 'Load sample';
+    card.append(heading, badges, description, settings, button);
+    list.append(card);
+  }
+}
+
+el('sample-list').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-sample-id]');
+  if (!button) return;
+  const sample = state.samples.items.find((item) => item.id === button.dataset.sampleId);
+  if (sample) loadSample(sample);
+});
+
+async function loadSamples() {
+  state.samples.status = 'loading';
+  renderSampleList();
+  const result = await loadSampleManifestState({ url: CONFIG.sampleManifestUrl });
+  if (result.status === 'ready') {
+    state.samples.status = 'ready';
+    state.samples.items = result.manifest.samples;
+  } else {
+    state.samples.status = 'unavailable';
+    state.samples.items = [];
+  }
+  renderSampleList();
 }
 
 function adoptImage(image, source) {
@@ -619,14 +725,21 @@ function adoptPdf(file) {
 let stream = null;
 
 el('btn-camera').addEventListener('click', async () => {
+  const intakeRevision = reserveIntake();
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('Camera capture is not supported by this browser.');
     }
-    stream = await navigator.mediaDevices.getUserMedia({
+    const nextStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
       audio: false,
     });
+    if (intakeRevision !== state.intakeRevision) {
+      nextStream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    stopCamera();
+    stream = nextStream;
     const video = el('video');
     video.srcObject = stream;
     video.hidden = false;
@@ -639,8 +752,10 @@ el('btn-camera').addEventListener('click', async () => {
     el('btn-camera').hidden = true;
     el('stage-caption').textContent = 'Live camera — frame the page and take the photo.';
   } catch {
-    stopCamera();
-    notice('The camera is unavailable, permission was refused, or the page is not running in a secure context.', 'error');
+    if (intakeRevision === state.intakeRevision) {
+      stopCamera();
+      notice('The camera is unavailable, permission was refused, or the page is not running in a secure context.', 'error');
+    }
   }
 });
 
@@ -652,7 +767,7 @@ el('btn-shoot').addEventListener('click', () => {
   }
   const canvas = IU.makeCanvas(video.videoWidth, video.videoHeight);
   canvas.getContext('2d').drawImage(video, 0, 0);
-  const intakeRevision = ++state.intakeRevision;
+  const intakeRevision = reserveIntake();
   const shot = new Image();
   shot.onload = () => {
     if (intakeRevision !== state.intakeRevision) return;
@@ -662,6 +777,11 @@ el('btn-shoot').addEventListener('click', () => {
       size: 0,
       type: 'image/jpeg',
     });
+  };
+  shot.onerror = () => {
+    if (intakeRevision === state.intakeRevision) {
+      notice('Could not decode the captured camera frame.', 'error');
+    }
   };
   shot.src = canvas.toDataURL('image/jpeg', 0.95);
 });
@@ -2352,6 +2472,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('beforeunload', () => {
   clearTimeout(authRevalidationTimer);
   authSync?.close();
+  state.sampleController?.abort();
   state.auth.verificationController?.abort();
   state.ocrController?.abort();
   state.aiController?.abort();
@@ -2369,6 +2490,7 @@ syncTextState();
 paintOcrAvailability();
 paintServerLegacy();
 paintAuthState();
+loadSamples();
 loadOcrModels();
 checkBackend();
 restoreAuthSession();

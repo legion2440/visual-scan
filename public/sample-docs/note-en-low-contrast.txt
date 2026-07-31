@@ -1,0 +1,10 @@
+PROJECT NOTE
+Note ID: NOTE-DEMO-415
+Date: 2026-09-18
+Review the two-page statement before the Friday demo.
+Check page order and confirm all totals use synthetic values.
+Try grayscale first, then enable threshold if the text remains faint.
+Do not add real customer records to the demonstration archive.
+Owner: Taylor Sample
+Status: ready for review
+notes@example.com

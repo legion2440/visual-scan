@@ -47,15 +47,19 @@
     "browser_ocr": {
       "entrypoint": "frontend/utils/ocr.js",
       "contracts": [
-        "frontend/ocrProfiles.js"
+        "frontend/ocrProfiles.js",
+        "frontend/assets/tessdata/manifest.json"
       ],
       "implementation": [
         "scripts/download-ocr-models.mjs",
-        "scripts/verify-ocr-models.mjs"
+        "scripts/verify-ocr-models.mjs",
+        "frontend/assets/tessdata/fast/eng.traineddata",
+        "frontend/assets/tessdata/fast/rus.traineddata"
       ],
       "owns": [
         "local Tesseract worker lifecycle",
-        "OCR profile availability and traineddata installation"
+        "OCR profile availability and traineddata installation",
+        "tracked fast English and Russian baseline models"
       ],
       "depends_on": [
         "frontend/config.js",

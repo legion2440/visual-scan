@@ -101,6 +101,12 @@ Run the model download script or choose an available profile.
 Node.js 18 or newer is required for the setup scripts. There are no package
 dependencies and no build step.
 
+The repository ships the official `tessdata_fast` English and Russian models
+plus their manifest. A fresh clone therefore supports the default Fast profile
+for English, Russian, and English + Russian without an installation command.
+The following commands install optional languages or the larger Standard and
+Best profiles.
+
 Download one or more uncompressed `.traineddata` files from the official
 Tesseract repositories:
 
@@ -137,9 +143,11 @@ frontend/assets/tessdata/
 └── best/
 ```
 
-The model files and generated `manifest.json` are machine-local and ignored by
-Git. After every download, the downloader runs the verifier and regenerates
-the manifest. You can also run it directly:
+Only `fast/eng.traineddata`, `fast/rus.traineddata`, and the baseline
+`manifest.json` are tracked. Other model files remain machine-local and ignored
+by Git. After every download, the downloader runs the verifier and regenerates
+the manifest from all models currently installed on that machine. You can also
+run it directly:
 
 ```bash
 node scripts/verify-ocr-models.mjs
@@ -156,6 +164,11 @@ runtime only when both `eng.traineddata` and `rus.traineddata` exist in the
 same profile directory. A missing manifest does not break image loading,
 Canvas tools, local storage, or optional backend calls; OCR selectors remain
 unavailable until models are installed and the manifest is generated.
+
+Running the verifier while optional Standard or Best models are present will
+modify the tracked manifest locally. Do not commit that machine-specific
+inventory unless those model files are intentionally becoming repository
+artifacts too.
 
 ## Backend setup and run
 
@@ -929,6 +942,7 @@ python -m ruff check backend
 python -m ruff format --check backend
 python -m compileall backend/app backend/tests
 python backend/scripts/generate_dependency_graph.py --check
+npm run ocr:verify
 npm run samples:verify
 npm test
 ```
@@ -968,13 +982,14 @@ The workflow runs three parallel quality groups:
 
 - backend tests on the minimum supported Python 3.11 and stable Python 3.14;
 - backend Ruff, format, compileall, and dependency-graph checks on Python 3.11;
-- sample-corpus verification and Node tests on Node.js 24 LTS.
+- baseline browser-OCR verification, sample-corpus verification, and Node tests
+  on Node.js 24 LTS.
 
 The final `ci` job succeeds only when every group succeeds and is the stable
 status intended for branch protection. Actions use read-only repository
 permissions, immutable full-SHA pins, and no dependency cache. CI does not
-install system Tesseract or download browser OCR models; tests use isolated
-fakes and the committed synthetic fixtures.
+install system Tesseract or download browser OCR models; it verifies the
+committed Fast baseline and uses isolated fakes for recognition behavior.
 
 The commands in [Tests and checks](#tests-and-checks) remain the local parity
 source for CI. Test counts may grow as coverage is added and are not hard-coded

@@ -5,10 +5,15 @@ uploads/
 *.tmp
 *.temp
 
-# OCR models are installed locally; availability is machine-specific
+# Optional OCR models are machine-local; baseline fast models are tracked below
 frontend/assets/tessdata/**/*.traineddata
 frontend/assets/tessdata/**/*.traineddata.gz
 frontend/assets/tessdata/manifest.json
+
+# Baseline browser OCR works immediately after clone
+!frontend/assets/tessdata/fast/eng.traineddata
+!frontend/assets/tessdata/fast/rus.traineddata
+!frontend/assets/tessdata/manifest.json
 
 # Python environments, caches, and local settings
 backend/.env

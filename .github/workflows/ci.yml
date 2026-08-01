@@ -76,6 +76,10 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
+      - name: Verify baseline browser OCR models
+        run: |
+          npm run ocr:verify
+          git diff --exit-code -- frontend/assets/tessdata/manifest.json
       - name: Verify demo corpus
         run: npm run samples:verify
       - name: Run frontend tests

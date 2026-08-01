@@ -1,6 +1,7 @@
 """Structural validation for the agent navigation module map."""
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -11,6 +12,10 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_MAP_PATH = REPOSITORY_ROOT / "backend" / "module-map.json"
 FRONTEND_MODULE_MAP_PATH = REPOSITORY_ROOT / "frontend" / "module-map.json"
+STATIC_JS_IMPORT = re.compile(
+    r"^\s*import(?:[\s\S]*?\sfrom\s*)?[\"']([^\"']+)[\"']\s*;?",
+    re.MULTILINE,
+)
 
 
 class DuplicateJsonKeyError(ValueError):
@@ -57,9 +62,30 @@ def iter_frontend_referenced_paths(module_map: dict[str, Any]) -> list[str]:
     paths = list(module_map["application"].values())
     for component in module_map.get("modules", {}).values():
         paths.append(component["entrypoint"])
-        for field in ("contracts", "implementation", "depends_on", "tests"):
+        for field in (
+            "contracts",
+            "implementation",
+            "composition",
+            "depends_on",
+            "tests",
+        ):
             paths.extend(component.get(field, []))
     return paths
+
+
+def local_static_js_imports(source: Path) -> set[Path]:
+    """Resolve direct relative static imports from one JavaScript module."""
+    if source.suffix not in {".js", ".mjs"}:
+        return set()
+    imports: set[Path] = set()
+    for specifier in STATIC_JS_IMPORT.findall(source.read_text(encoding="utf-8")):
+        if not specifier.startswith("."):
+            continue
+        target = (source.parent / specifier).resolve()
+        target.relative_to(REPOSITORY_ROOT.resolve())
+        assert target.is_file(), f"Imported frontend module does not exist: {specifier}"
+        imports.add(target)
+    return imports
 
 
 def validate_repository_path(value: str) -> Path:
@@ -94,8 +120,41 @@ def test_frontend_module_map_is_valid_and_references_existing_repo_files() -> No
 
     assert module_map["version"] == 1
     assert module_map["modules"]
+    assert set(module_map["field_semantics"]) == {
+        "entrypoint",
+        "contracts",
+        "implementation",
+        "composition",
+        "depends_on",
+        "tests",
+    }
     for value in iter_frontend_referenced_paths(module_map):
         validate_repository_path(value)
+
+
+def test_frontend_dependencies_match_direct_static_imports() -> None:
+    module_map = load_module_map(FRONTEND_MODULE_MAP_PATH)
+
+    for component_id, component in module_map["modules"].items():
+        source_paths = [
+            validate_repository_path(component["entrypoint"]),
+            *(validate_repository_path(value) for value in component.get("implementation", [])),
+        ]
+        owned_paths = set(source_paths)
+        imported_paths = {
+            imported
+            for source in source_paths
+            for imported in local_static_js_imports(source)
+            if imported not in owned_paths
+        }
+        declared_paths = {
+            validate_repository_path(value) for value in component.get("depends_on", [])
+        }
+        assert declared_paths == imported_paths, (
+            f"Frontend module dependency mismatch for {component_id}: "
+            f"declared={sorted(str(path) for path in declared_paths)}, "
+            f"imported={sorted(str(path) for path in imported_paths)}"
+        )
 
 
 def test_duplicate_json_keys_are_rejected() -> None:

@@ -1125,3 +1125,10 @@ visual-scan/
   complete-export coordination.
 - `store.js` is a compatibility reader/export/clear adapter for legacy
   browser-only records; it never stores active archive results.
+
+Frontend map fields have fixed meanings: `entrypoint` is the public owner,
+`contracts` are the schemas, registries, and data contracts required to change
+behavior, `implementation` contains module-owned internals, and `composition`
+identifies application wiring read only for integration changes. `depends_on`
+is the exact set of direct repo-local static imports from `entrypoint` and
+`implementation`; structural tests reject both missing and decorative entries.

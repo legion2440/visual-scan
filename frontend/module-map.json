@@ -6,22 +6,30 @@
     "styles": "frontend/styles.css",
     "config": "frontend/config.js"
   },
+  "field_semantics": {
+    "entrypoint": "public owner module for the capability",
+    "contracts": "schemas, registries, or data contracts an agent must read before changing behavior",
+    "implementation": "internal files owned by the module",
+    "composition": "application wiring to inspect only when integration changes",
+    "depends_on": "exact direct repo-local static imports from entrypoint and implementation",
+    "tests": "scoped regression tests"
+  },
   "modules": {
     "intake": {
       "entrypoint": "frontend/intakeContract.js",
       "contracts": [],
       "implementation": [
-        "frontend/app.js",
         "frontend/utils/camera.js"
+      ],
+      "composition": [
+        "frontend/app.js"
       ],
       "owns": [
         "shared upload MIME, byte, and pixel limits",
         "file, drop, camera, and sample intake revision lifecycle",
         "camera stream ownership and playback cleanup"
       ],
-      "depends_on": [
-        "frontend/config.js"
-      ],
+      "depends_on": [],
       "tests": [
         "tests/camera.test.mjs"
       ]
@@ -33,9 +41,7 @@
       "owns": [
         "Canvas decode, transform, crop, and preprocessing operations"
       ],
-      "depends_on": [
-        "frontend/intakeContract.js"
-      ],
+      "depends_on": [],
       "tests": []
     },
     "browser_ocr": {
@@ -52,7 +58,8 @@
         "OCR profile availability and traineddata installation"
       ],
       "depends_on": [
-        "frontend/config.js"
+        "frontend/config.js",
+        "frontend/ocrProfiles.js"
       ],
       "tests": [
         "tests/ocr.test.mjs"
@@ -68,7 +75,9 @@
         "all backend HTTP requests",
         "timeouts, API errors, credentials, and in-memory CSRF transport"
       ],
-      "depends_on": [],
+      "depends_on": [
+        "frontend/config.js"
+      ],
       "tests": [
         "tests/api.test.mjs"
       ]
@@ -83,9 +92,7 @@
         "public session normalization and auth revision rules",
         "cross-tab identity hints"
       ],
-      "depends_on": [
-        "frontend/utils/api.js"
-      ],
+      "depends_on": [],
       "tests": [
         "tests/auth.test.mjs",
         "tests/authSync.test.mjs"
@@ -101,10 +108,7 @@
         "scan payloads, analysis freshness, pagination, and export coordination",
         "read/export/clear compatibility for legacy browser records"
       ],
-      "depends_on": [
-        "frontend/utils/api.js",
-        "frontend/utils/auth.js"
-      ],
+      "depends_on": [],
       "tests": [
         "tests/archive.test.mjs",
         "tests/store.test.mjs"
@@ -114,6 +118,8 @@
       "entrypoint": "frontend/utils/samples.js",
       "contracts": [
         "frontend/intakeContract.js",
+        "frontend/ocrProfiles.js",
+        "frontend/utils/archive.js",
         "public/sample-docs/manifest.json"
       ],
       "implementation": [
@@ -126,7 +132,9 @@
         "demo corpus integrity and provenance verification"
       ],
       "depends_on": [
-        "frontend/config.js"
+        "frontend/intakeContract.js",
+        "frontend/ocrProfiles.js",
+        "frontend/utils/archive.js"
       ],
       "tests": [
         "tests/samples.test.mjs"

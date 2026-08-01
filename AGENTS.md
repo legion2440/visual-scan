@@ -22,13 +22,17 @@ For frontend, browser integration, OCR-model tooling, or demo-corpus work:
 
 1. Open `frontend/module-map.json`.
 2. Locate the owning module and read its entrypoint, contracts, implementation,
-   and scoped tests only.
+   and scoped tests. Read `composition` only when integration wiring changes.
 3. Treat `frontend/app.js` as orchestration; keep reusable lifecycle and
    validation rules in the owning utility module.
 4. Keep all backend HTTP requests in `frontend/utils/api.js`.
 5. When adding or moving a frontend module, script, contract, or scoped test,
    update `frontend/module-map.json`.
 6. Run the owning Node test file first, then `npm test` and the module-map test.
+
+In the frontend map, `depends_on` is the exact set of direct repo-local static
+imports from a module's entrypoint and implementation files. Do not use it for
+application-level wiring; declare that under `composition` instead.
 
 For a change that crosses frontend and backend boundaries, consult both maps
 before editing. Keep the backend dependency graph generated only from the

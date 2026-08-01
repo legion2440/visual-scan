@@ -3,6 +3,7 @@ export async function activateCameraAfterPlayback({
   getCurrentIntakeRevision,
   intakeRevision,
   onReady,
+  stopCamera,
   stream,
   video,
 }) {
@@ -12,7 +13,11 @@ export async function activateCameraAfterPlayback({
     || getActiveStream() !== stream
     || video.srcObject !== stream
   ) {
-    stream.getTracks().forEach((track) => track.stop());
+    if (getActiveStream() === stream) {
+      stopCamera();
+    } else {
+      stream.getTracks().forEach((track) => track.stop());
+    }
     return false;
   }
   onReady();

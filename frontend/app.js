@@ -749,6 +749,7 @@ el('btn-camera').addEventListener('click', async () => {
       getCurrentIntakeRevision: () => state.intakeRevision,
       intakeRevision,
       stream: nextStream,
+      stopCamera,
       video,
       onReady: () => {
         el('stage').hidden = false;

@@ -1,3 +1,11 @@
+function releaseCameraStream({ getActiveStream, stopCamera, stream }) {
+  if (getActiveStream() === stream) {
+    stopCamera();
+  } else {
+    stream.getTracks().forEach((track) => track.stop());
+  }
+}
+
 export async function activateCameraAfterPlayback({
   getActiveStream,
   getCurrentIntakeRevision,
@@ -7,17 +15,18 @@ export async function activateCameraAfterPlayback({
   stream,
   video,
 }) {
-  await video.play();
+  try {
+    await video.play();
+  } catch (error) {
+    releaseCameraStream({ getActiveStream, stopCamera, stream });
+    throw error;
+  }
   if (
     intakeRevision !== getCurrentIntakeRevision()
     || getActiveStream() !== stream
     || video.srcObject !== stream
   ) {
-    if (getActiveStream() === stream) {
-      stopCamera();
-    } else {
-      stream.getTracks().forEach((track) => track.stop());
-    }
+    releaseCameraStream({ getActiveStream, stopCamera, stream });
     return false;
   }
   onReady();

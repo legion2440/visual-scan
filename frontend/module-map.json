@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "application": {
+    "entrypoint": "frontend/app.js",
+    "document": "frontend/index.html",
+    "styles": "frontend/styles.css",
+    "config": "frontend/config.js"
+  },
+  "modules": {
+    "intake": {
+      "entrypoint": "frontend/intakeContract.js",
+      "contracts": [],
+      "implementation": [
+        "frontend/app.js",
+        "frontend/utils/camera.js"
+      ],
+      "owns": [
+        "shared upload MIME, byte, and pixel limits",
+        "file, drop, camera, and sample intake revision lifecycle",
+        "camera stream ownership and playback cleanup"
+      ],
+      "depends_on": [
+        "frontend/config.js"
+      ],
+      "tests": [
+        "tests/camera.test.mjs"
+      ]
+    },
+    "image_processing": {
+      "entrypoint": "frontend/utils/imageUtils.js",
+      "contracts": [],
+      "implementation": [],
+      "owns": [
+        "Canvas decode, transform, crop, and preprocessing operations"
+      ],
+      "depends_on": [
+        "frontend/intakeContract.js"
+      ],
+      "tests": []
+    },
+    "browser_ocr": {
+      "entrypoint": "frontend/utils/ocr.js",
+      "contracts": [
+        "frontend/ocrProfiles.js"
+      ],
+      "implementation": [
+        "scripts/download-ocr-models.mjs",
+        "scripts/verify-ocr-models.mjs"
+      ],
+      "owns": [
+        "local Tesseract worker lifecycle",
+        "OCR profile availability and traineddata installation"
+      ],
+      "depends_on": [
+        "frontend/config.js"
+      ],
+      "tests": [
+        "tests/ocr.test.mjs"
+      ]
+    },
+    "api_transport": {
+      "entrypoint": "frontend/utils/api.js",
+      "contracts": [
+        "frontend/config.js"
+      ],
+      "implementation": [],
+      "owns": [
+        "all backend HTTP requests",
+        "timeouts, API errors, credentials, and in-memory CSRF transport"
+      ],
+      "depends_on": [],
+      "tests": [
+        "tests/api.test.mjs"
+      ]
+    },
+    "auth": {
+      "entrypoint": "frontend/utils/auth.js",
+      "contracts": [],
+      "implementation": [
+        "frontend/utils/authSync.js"
+      ],
+      "owns": [
+        "public session normalization and auth revision rules",
+        "cross-tab identity hints"
+      ],
+      "depends_on": [
+        "frontend/utils/api.js"
+      ],
+      "tests": [
+        "tests/auth.test.mjs",
+        "tests/authSync.test.mjs"
+      ]
+    },
+    "archive": {
+      "entrypoint": "frontend/utils/archive.js",
+      "contracts": [],
+      "implementation": [
+        "frontend/utils/store.js"
+      ],
+      "owns": [
+        "scan payloads, analysis freshness, pagination, and export coordination",
+        "read/export/clear compatibility for legacy browser records"
+      ],
+      "depends_on": [
+        "frontend/utils/api.js",
+        "frontend/utils/auth.js"
+      ],
+      "tests": [
+        "tests/archive.test.mjs",
+        "tests/store.test.mjs"
+      ]
+    },
+    "demo_samples": {
+      "entrypoint": "frontend/utils/samples.js",
+      "contracts": [
+        "frontend/intakeContract.js",
+        "public/sample-docs/manifest.json"
+      ],
+      "implementation": [
+        "scripts/verify-sample-docs.mjs",
+        "public/sample-docs/SOURCES.md"
+      ],
+      "owns": [
+        "strict sample manifest normalization",
+        "lazy static sample loading",
+        "demo corpus integrity and provenance verification"
+      ],
+      "depends_on": [
+        "frontend/config.js"
+      ],
+      "tests": [
+        "tests/samples.test.mjs"
+      ]
+    }
+  }
+}

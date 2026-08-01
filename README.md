@@ -1046,6 +1046,7 @@ visual-scan/
 │   │       ├── standard/
 │   │       └── best/
 │   ├── utils/
+│   │   ├── camera.js
 │   │   ├── imageUtils.js
 │   │   ├── ocr.js
 │   │   ├── api.js
@@ -1059,6 +1060,7 @@ visual-scan/
 │   ├── app.js
 │   ├── config.js
 │   ├── intakeContract.js
+│   ├── module-map.json
 │   └── ocrProfiles.js
 ├── scripts/
 │   ├── download-ocr-models.mjs
@@ -1069,6 +1071,7 @@ visual-scan/
 │   ├── archive.test.mjs
 │   ├── auth.test.mjs
 │   ├── authSync.test.mjs
+│   ├── camera.test.mjs
 │   ├── ocr.test.mjs
 │   ├── samples.test.mjs
 │   └── store.test.mjs
@@ -1104,9 +1107,13 @@ visual-scan/
   versions, strict validation, and migrations for all feature repositories.
 - `backend/module-map.json` is the backend navigation and ownership index.
 - `backend/DEPENDENCY_GRAPH.md` is deterministically generated from that map.
+- `frontend/module-map.json` is the frontend, browser-tooling, and demo-corpus
+  navigation and ownership index.
 - `app.js` connects the interface, state, and user actions.
 - `config.js` composes browser/runtime URLs, deadlines, and shared limits.
 - `intakeContract.js` is the shared pure MIME, byte, and pixel limit registry.
+- `camera.js` owns the async camera playback commit barrier and stale-stream
+  cleanup rules.
 - `ocrProfiles.js` is the shared pure OCR registry.
 - `imageUtils.js` contains Canvas image operations.
 - `ocr.js` owns availability, the active Tesseract worker, and OCR progress.

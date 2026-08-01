@@ -80,3 +80,81 @@ test('stale camera completion does not clear a replacement camera stream', async
   assert.equal(stopCameraCalls, 0);
   assert.equal(stoppedOldTracks, 1);
 });
+
+test('failed newer intake restores the old image after stale video.play rejection', async () => {
+  let rejectPlayback;
+  let currentIntakeRevision = 1;
+  let stoppedTracks = 0;
+  let previewHidden = false;
+  const stream = {
+    getTracks: () => [{ stop: () => { stoppedTracks += 1; } }],
+  };
+  let activeStream = stream;
+  const video = {
+    hidden: false,
+    srcObject: stream,
+    play: () => new Promise((_resolve, reject) => { rejectPlayback = reject; }),
+  };
+
+  const cameraCompletion = activateCameraAfterPlayback({
+    getActiveStream: () => activeStream,
+    getCurrentIntakeRevision: () => currentIntakeRevision,
+    intakeRevision: 1,
+    onReady: () => { previewHidden = true; },
+    stopCamera: () => {
+      activeStream.getTracks().forEach((track) => track.stop());
+      activeStream = null;
+      video.srcObject = null;
+      video.hidden = true;
+      previewHidden = false;
+    },
+    stream,
+    video,
+  });
+
+  // The replacement intake reserves the revision but fails before commit.
+  currentIntakeRevision = 2;
+  rejectPlayback(new Error('Playback failed.'));
+
+  await assert.rejects(cameraCompletion, /Playback failed/);
+  assert.equal(activeStream, null);
+  assert.equal(video.srcObject, null);
+  assert.equal(video.hidden, true);
+  assert.equal(previewHidden, false);
+  assert.equal(stoppedTracks, 1);
+});
+
+test('rejected stale playback stops only its old stream when a new camera is active', async () => {
+  let rejectPlayback;
+  let stoppedOldTracks = 0;
+  let stopCameraCalls = 0;
+  const oldStream = {
+    getTracks: () => [{ stop: () => { stoppedOldTracks += 1; } }],
+  };
+  const replacementStream = { getTracks: () => [] };
+  let activeStream = oldStream;
+  const video = {
+    srcObject: oldStream,
+    play: () => new Promise((_resolve, reject) => { rejectPlayback = reject; }),
+  };
+
+  const cameraCompletion = activateCameraAfterPlayback({
+    getActiveStream: () => activeStream,
+    getCurrentIntakeRevision: () => 2,
+    intakeRevision: 1,
+    onReady: () => assert.fail('Rejected playback must not become ready.'),
+    stopCamera: () => { stopCameraCalls += 1; },
+    stream: oldStream,
+    video,
+  });
+
+  activeStream = replacementStream;
+  video.srcObject = replacementStream;
+  rejectPlayback(new Error('Old playback failed.'));
+
+  await assert.rejects(cameraCompletion, /Old playback failed/);
+  assert.equal(activeStream, replacementStream);
+  assert.equal(video.srcObject, replacementStream);
+  assert.equal(stopCameraCalls, 0);
+  assert.equal(stoppedOldTracks, 1);
+});

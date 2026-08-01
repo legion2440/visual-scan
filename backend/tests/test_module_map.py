@@ -10,6 +10,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_MAP_PATH = REPOSITORY_ROOT / "backend" / "module-map.json"
+FRONTEND_MODULE_MAP_PATH = REPOSITORY_ROOT / "frontend" / "module-map.json"
 
 
 class DuplicateJsonKeyError(ValueError):
@@ -26,10 +27,10 @@ def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def load_module_map() -> dict[str, Any]:
-    """Load module-map.json while rejecting duplicate object and feature keys."""
+def load_module_map(path: Path = MODULE_MAP_PATH) -> dict[str, Any]:
+    """Load module-map.json while rejecting duplicate object and component keys."""
     return json.loads(
-        MODULE_MAP_PATH.read_text(encoding="utf-8"),
+        path.read_text(encoding="utf-8"),
         object_pairs_hook=reject_duplicate_keys,
     )
 
@@ -48,6 +49,16 @@ def iter_referenced_paths(module_map: dict[str, Any]) -> list[str]:
             paths.append(component["entrypoint"])
             for field in ("contracts", "implementation", "depends_on", "tests"):
                 paths.extend(component.get(field, []))
+    return paths
+
+
+def iter_frontend_referenced_paths(module_map: dict[str, Any]) -> list[str]:
+    """Return every file path declared by the frontend navigation map."""
+    paths = list(module_map["application"].values())
+    for component in module_map.get("modules", {}).values():
+        paths.append(component["entrypoint"])
+        for field in ("contracts", "implementation", "depends_on", "tests"):
+            paths.extend(component.get(field, []))
     return paths
 
 
@@ -75,6 +86,15 @@ def test_module_map_is_valid_and_references_existing_repo_files() -> None:
     assert module_map["infrastructure"]
     assert module_map["features"]
     for value in iter_referenced_paths(module_map):
+        validate_repository_path(value)
+
+
+def test_frontend_module_map_is_valid_and_references_existing_repo_files() -> None:
+    module_map = load_module_map(FRONTEND_MODULE_MAP_PATH)
+
+    assert module_map["version"] == 1
+    assert module_map["modules"]
+    for value in iter_frontend_referenced_paths(module_map):
         validate_repository_path(value)
 
 

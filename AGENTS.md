@@ -1,5 +1,7 @@
 # Visual Scan agent guide
 
+Choose the navigation map before reading implementation files.
+
 For backend work:
 
 1. Open `backend/module-map.json`.
@@ -15,3 +17,19 @@ For backend work:
 
 Create service, pipeline, provider, and repository layers only when the feature
 has logic that needs them. Do not add placeholder modules.
+
+For frontend, browser integration, OCR-model tooling, or demo-corpus work:
+
+1. Open `frontend/module-map.json`.
+2. Locate the owning module and read its entrypoint, contracts, implementation,
+   and scoped tests only.
+3. Treat `frontend/app.js` as orchestration; keep reusable lifecycle and
+   validation rules in the owning utility module.
+4. Keep all backend HTTP requests in `frontend/utils/api.js`.
+5. When adding or moving a frontend module, script, contract, or scoped test,
+   update `frontend/module-map.json`.
+6. Run the owning Node test file first, then `npm test` and the module-map test.
+
+For a change that crosses frontend and backend boundaries, consult both maps
+before editing. Keep the backend dependency graph generated only from the
+backend map.

@@ -958,11 +958,36 @@ references, checksum/size/dimension drift, image/PDF `File` conversion,
 HTTP/MIME/oversize errors, aborts, stale completion, and unavailable-manifest
 degradation without invoking Tesseract.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs for pushes to `main`, pull requests targeting
+`main`, and manual dispatches. Concurrent runs share one branch/PR group, so a
+new push cancels the older run.
+
+The workflow runs three parallel quality groups:
+
+- backend tests on the minimum supported Python 3.11 and stable Python 3.14;
+- backend Ruff, format, compileall, and dependency-graph checks on Python 3.11;
+- sample-corpus verification and Node tests on Node.js 24 LTS.
+
+The final `ci` job succeeds only when every group succeeds and is the stable
+status intended for branch protection. Actions use read-only repository
+permissions, immutable full-SHA pins, and no dependency cache. CI does not
+install system Tesseract or download browser OCR models; tests use isolated
+fakes and the committed synthetic fixtures.
+
+The commands in [Tests and checks](#tests-and-checks) remain the local parity
+source for CI. Test counts may grow as coverage is added and are not hard-coded
+in the workflow.
+
 ## Structure
 
 ```text
 visual-scan/
 ├── AGENTS.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── backend/
 │   ├── app/
 │   │   ├── api/

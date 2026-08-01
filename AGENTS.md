@@ -37,3 +37,9 @@ application-level wiring; declare that under `composition` instead.
 For a change that crosses frontend and backend boundaries, consult both maps
 before editing. Keep the backend dependency graph generated only from the
 backend map.
+
+Before completing repository work, use the same scoped commands represented in
+`.github/workflows/ci.yml`: backend tests, Ruff, format check, compileall,
+dependency-graph validation, sample-corpus verification, and Node tests as
+applicable. The CI workflow is repository automation, not an ownership map; do
+not add it to either module map.

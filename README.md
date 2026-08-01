@@ -172,14 +172,30 @@ artifacts too.
 
 ## Backend setup and run
 
-Python 3.11 or newer is required. From the repository root, install the backend
-and its development tools:
+Python 3.11 or newer is required.
+
+### Runtime installation
+
+From the repository root, install the application dependencies with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Development installation
+
+Install the backend package and its test/lint tools with:
 
 ```bash
 python -m pip install -e "./backend[dev]"
 ```
 
-The Python package installs Pillow and pytesseract, but pytesseract does not
+The root `requirements.txt` provides a simple runtime installation path.
+`backend/pyproject.toml` remains the source for backend package metadata,
+runtime dependency constraints, and development extras. A regression test
+requires both runtime dependency lists to remain identical.
+
+The runtime dependencies include Pillow and pytesseract, but pytesseract does not
 bundle the native Tesseract executable or language data. Install Tesseract
 separately:
 
@@ -1000,6 +1016,7 @@ in the workflow.
 ```text
 visual-scan/
 ├── AGENTS.md
+├── requirements.txt
 ├── .github/
 │   └── workflows/
 │       └── ci.yml
@@ -1066,6 +1083,7 @@ visual-scan/
 │   │   ├── test_pdf_ocr_api.py
 │   │   ├── test_pdf_ocr_pipeline.py
 │   │   ├── test_pdf_renderer.py
+│   │   ├── test_requirements_sync.py
 │   │   ├── test_scan_ownership.py
 │   │   ├── test_scans_api.py
 │   │   ├── test_scans_service.py

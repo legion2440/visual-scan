@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     ai_api_key: SecretStr = SecretStr("")
     ai_model: str = ""
     ai_provider_name: str = "openai-compatible"
-    ai_timeout_seconds: float = Field(default=45, gt=0)
+    ai_timeout_seconds: float = Field(default=90, gt=0)
     ai_max_input_chars: int = Field(default=50_000, gt=0)
     ai_max_output_tokens: int = Field(default=1_200, gt=0)
     ai_response_format: Literal["json_object", "prompt_only"] = "json_object"

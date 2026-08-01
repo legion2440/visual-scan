@@ -79,7 +79,7 @@ brew install tesseract tesseract-lang
 ```
 
 На Windows установите Tesseract 5 и добавьте его каталог в `PATH`. Если executable не находится через `PATH`, укажите полный путь в `backend/.env`:
-
+https://github.com/UB-Mannheim/tesseract/wiki
 ```dotenv
 VISUAL_SCAN_TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 ```
@@ -97,10 +97,13 @@ tesseract --list-langs
 python -m uvicorn app.main:app --app-dir backend --reload
 ```
 
-API доступен по адресам:
+Проверка backend:
+```bash
+http://localhost:8000/api/health
+```
 
-```text
-http://localhost:8000
+FastAPI Swagger UI:
+```bash
 http://localhost:8000/docs
 ```
 

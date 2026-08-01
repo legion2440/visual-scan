@@ -19,7 +19,7 @@ export const CONFIG = Object.freeze({
   healthTimeoutMs: 4_000,
   archiveTimeoutMs: 15_000,
   imageOcrTimeoutMs: 60_000,
-  aiTimeoutMs: 60_000,
+  aiTimeoutMs: 100_000,
   pdfOcrTimeoutMs: 210_000,
   maxImageBytes: INTAKE_LIMITS.maxImageBytes,
   maxPdfBytes: INTAKE_LIMITS.maxPdfBytes,

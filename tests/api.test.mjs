@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { CONFIG } from '../frontend/config.js';
 import { api, ApiError, request } from '../frontend/utils/api.js';
 
 function jsonResponse(payload, status = 200) {
@@ -9,6 +10,10 @@ function jsonResponse(payload, status = 200) {
     headers: { 'content-type': 'application/json' },
   });
 }
+
+test('AI request timeout leaves margin beyond the backend deadline', () => {
+  assert.equal(CONFIG.aiTimeoutMs, 100_000);
+});
 
 test('health decodes JSON and scan list serializes query parameters', async (t) => {
   const originalFetch = globalThis.fetch;

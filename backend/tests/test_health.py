@@ -62,6 +62,12 @@ async def test_default_cors_does_not_advertise_cross_site_loopback_origin() -> N
     assert "http://127.0.0.1:5500" not in settings.cors_origins
 
 
+async def test_default_ai_timeout_leaves_frontend_response_margin() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.ai_timeout_seconds == 90
+
+
 async def test_credentialed_cors_preflight_uses_explicit_methods_and_headers(
     anonymous_client: AsyncClient,
 ) -> None:

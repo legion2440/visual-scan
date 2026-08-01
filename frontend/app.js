@@ -6,8 +6,9 @@
  * records behind the explicit legacy adapter in store.js.
  */
 
-import * as IU from './utils/imageUtils.js';
 import { CONFIG } from './config.js';
+import { activateCameraAfterPlayback } from './utils/camera.js';
+import * as IU from './utils/imageUtils.js';
 import {
   availableLanguagesForProfile,
   isOcrCombinationAvailable,
@@ -743,14 +744,22 @@ el('btn-camera').addEventListener('click', async () => {
     const video = el('video');
     video.srcObject = stream;
     video.hidden = false;
-    await video.play();
-    el('stage').hidden = false;
-    el('preview').hidden = true;
-    el('overlay').hidden = true;
-    el('btn-shoot').hidden = false;
-    el('btn-camera-stop').hidden = false;
-    el('btn-camera').hidden = true;
-    el('stage-caption').textContent = 'Live camera — frame the page and take the photo.';
+    await activateCameraAfterPlayback({
+      getActiveStream: () => stream,
+      getCurrentIntakeRevision: () => state.intakeRevision,
+      intakeRevision,
+      stream: nextStream,
+      video,
+      onReady: () => {
+        el('stage').hidden = false;
+        el('preview').hidden = true;
+        el('overlay').hidden = true;
+        el('btn-shoot').hidden = false;
+        el('btn-camera-stop').hidden = false;
+        el('btn-camera').hidden = true;
+        el('stage-caption').textContent = 'Live camera — frame the page and take the photo.';
+      },
+    });
   } catch {
     if (intakeRevision === state.intakeRevision) {
       stopCamera();

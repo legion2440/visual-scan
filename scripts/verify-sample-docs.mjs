@@ -32,6 +32,30 @@ function corpusError(message, cause) {
   return new SampleCorpusVerificationError(message, { cause });
 }
 
+export function validateCorpusDirectoryEntries(directoryEntries, declaredAssets) {
+  const seenNames = new Set();
+  for (const entry of directoryEntries) {
+    const normalizedName = entry.name.toLowerCase();
+    if (seenNames.has(normalizedName)) {
+      throw corpusError(`Corpus filenames must be unique ignoring case: ${entry.name}.`);
+    }
+    seenNames.add(normalizedName);
+    if (entry.isSymbolicLink()) {
+      throw corpusError(`Corpus paths must not be symbolic links: ${entry.name}.`);
+    }
+
+    const extension = path.extname(entry.name).toLowerCase();
+    if (BINARY_EXTENSIONS.has(extension)) {
+      if (!entry.isFile()) {
+        throw corpusError(`Binary sample path must be a regular file: ${entry.name}.`);
+      }
+      if (!declaredAssets.has(normalizedName)) {
+        throw corpusError(`Undeclared binary sample asset: ${entry.name}.`);
+      }
+    }
+  }
+}
+
 export function sha256Hex(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -194,17 +218,7 @@ export async function verifySampleCorpus({
   }
 
   const directoryEntries = await readdir(corpusDirectory, { withFileTypes: true });
-  for (const entry of directoryEntries) {
-    const extension = path.extname(entry.name).toLowerCase();
-    if (BINARY_EXTENSIONS.has(extension)) {
-      if (entry.isSymbolicLink() || !entry.isFile()) {
-        throw corpusError(`Binary sample path must be a regular file: ${entry.name}.`);
-      }
-      if (!declaredAssets.has(entry.name.toLowerCase())) {
-        throw corpusError(`Undeclared binary sample asset: ${entry.name}.`);
-      }
-    }
-  }
+  validateCorpusDirectoryEntries(directoryEntries, declaredAssets);
   return Object.freeze({
     sampleCount: manifest.samples.length,
     totalAssetBytes,

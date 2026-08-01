@@ -13,8 +13,17 @@ import {
 } from '../frontend/utils/samples.js';
 import {
   sha256Hex,
+  validateCorpusDirectoryEntries,
   verifySampleCorpus,
 } from '../scripts/verify-sample-docs.mjs';
+
+function directoryEntry(name, { file = true, symbolicLink = false } = {}) {
+  return {
+    name,
+    isFile: () => file,
+    isSymbolicLink: () => symbolicLink,
+  };
+}
 
 function pngBytes(width = 1, height = 1) {
   const bytes = new Uint8Array(32);
@@ -136,6 +145,25 @@ test('corpus verifier rejects checksum, byte-size, and dimension mismatches', as
       await assert.rejects(verifySampleCorpus({ directory }), expected);
     });
   }
+});
+
+test('corpus verifier rejects case-insensitive filename collisions', () => {
+  const entries = [
+    directoryEntry('sample.png'),
+    directoryEntry('SAMPLE.PNG'),
+  ];
+  assert.throws(
+    () => validateCorpusDirectoryEntries(entries, new Set(['sample.png'])),
+    /unique ignoring case/,
+  );
+});
+
+test('corpus verifier rejects an undeclared symlink with a non-binary extension', () => {
+  const entries = [directoryEntry('undocumented-link.txt', { symbolicLink: true })];
+  assert.throws(
+    () => validateCorpusDirectoryEntries(entries, new Set()),
+    /must not be symbolic links/,
+  );
 });
 
 test('committed demo corpus passes complete verification', async () => {
